@@ -519,32 +519,7 @@ struct GuardView: View {
     private var navigation: some View {
         ZStack {
             HStack(spacing: 2) {
-                ForEach(GuardPage.allCases, id: \.self) { item in
-                    Button { go(item) } label: {
-                        HStack(spacing: 7) {
-                            Circle().fill(tabDot(item)).frame(width: 6, height: 6)
-                                .opacity(page == item ? 1 : 0.7)
-                            Text(item.rawValue).font(.system(size: 13, weight: .semibold))
-                        }
-                        .frame(width: 92, height: 34)
-                        .foregroundStyle(page == item ? Color.black.opacity(0.88) : Color.white.opacity(hoveredTab == item ? 0.86 : 0.55))
-                        .background {
-                            if page == item {
-                                Capsule().fill(Color.white.opacity(0.96))
-                                    .shadow(color: .black.opacity(0.20), radius: 6, y: 2)
-                                    .matchedGeometryEffect(id: "tab", in: tabSelection)
-                            } else if hoveredTab == item {
-                                Capsule().fill(Color.white.opacity(0.06))
-                            }
-                        }
-                        .contentShape(Capsule())
-                    }.buttonStyle(.plain)
-                        .keyboardShortcut(item.shortcut, modifiers: .command)
-                        .help(item.rawValue + "（⌘" + String(item.shortcut.character) + "）")
-                        .onHover { inside in hoveredTab = inside ? item : (hoveredTab == item ? nil : hoveredTab) }
-                        .accessibilityIdentifier("tab-" + item.rawValue)
-                        .accessibilityAddTraits(page == item ? [.isSelected] : [])
-                }
+                ForEach(GuardPage.allCases, id: \.self) { item in tabButton(item) }
             }.padding(5).background(Color.white.opacity(0.05), in: Capsule())
                 .overlay(Capsule().strokeBorder(Color.white.opacity(0.09), lineWidth: 1))
             HStack {
@@ -558,6 +533,35 @@ struct GuardView: View {
                 }
             }.padding(.horizontal, 28)
         }.padding(.top, 8)
+    }
+    private func tabButton(_ item: GuardPage) -> some View {
+        let selected = page == item
+        let textColor: Color = selected ? Color.black.opacity(0.88) : Color.white.opacity(hoveredTab == item ? 0.86 : 0.55)
+        let hint: String = "\(item.rawValue)（⌘\(String(item.shortcut.character))）"
+        return Button { go(item) } label: {
+            HStack(spacing: 7) {
+                Circle().fill(tabDot(item)).frame(width: 6, height: 6)
+                    .opacity(page == item ? 1 : 0.7)
+                Text(item.rawValue).font(.system(size: 13, weight: .semibold))
+            }
+            .frame(width: 92, height: 34)
+            .foregroundStyle(textColor)
+            .background {
+                if page == item {
+                    Capsule().fill(Color.white.opacity(0.96))
+                        .shadow(color: .black.opacity(0.20), radius: 6, y: 2)
+                        .matchedGeometryEffect(id: "tab", in: tabSelection)
+                } else if hoveredTab == item {
+                    Capsule().fill(Color.white.opacity(0.06))
+                }
+            }
+            .contentShape(Capsule())
+        }.buttonStyle(.plain)
+            .keyboardShortcut(item.shortcut, modifiers: .command)
+            .help(hint)
+            .onHover { inside in hoveredTab = inside ? item : (hoveredTab == item ? nil : hoveredTab) }
+            .accessibilityIdentifier("tab-" + item.rawValue)
+            .accessibilityAddTraits(page == item ? [.isSelected] : [])
     }
     private func tabDot(_ item: GuardPage) -> Color {
         switch item {
