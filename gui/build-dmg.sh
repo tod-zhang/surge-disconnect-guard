@@ -5,8 +5,8 @@ BASE=$(cd -- "$GUI/.." && pwd -P)
 WORK=${1:?请传入中间构建目录的绝对路径}
 OUTPUT=${2:?请传入输出 DMG 的绝对路径}
 # App version; the detection engine and privileged helper keep their own version (2.4.0).
-VERSION=2.6.0
-BUILD_NUMBER=260
+VERSION=2.6.1
+BUILD_NUMBER=261
 APP="$WORK/Surge 断网守护.app"
 STAGE="$WORK/dmg-root"
 mkdir -p "$WORK" "$APP/Contents/MacOS" "$APP/Contents/Resources/engine" "$STAGE"

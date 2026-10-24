@@ -22,18 +22,30 @@ jobs:
           python3 gui/test_gui_control.py
           python3 gui/test_permission_control.py
 
-      - name: Check the tag matches the app version
-        if: github.ref_type == 'tag'
+      - name: Decide whether this build is a release
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           # The in-app updater only installs a DMG whose app version equals the release tag.
           version=$(sed -n 's/^VERSION=//p' gui/build-dmg.sh)
           fallback=$(sed -n 's/^let fallbackAppVersion = "\(.*\)"$/\1/p' gui/Updater.swift)
-          [[ "$GITHUB_REF_NAME" == "v$version" && "$fallback" == "$version" ]] || {
-            echo "::error::Tag $GITHUB_REF_NAME does not match build-dmg.sh VERSION=$version / Updater.swift $fallback"; exit 1; }
+          [[ "$fallback" == "$version" ]] || {
+            echo "::error::build-dmg.sh VERSION=$version does not match Updater.swift $fallback"; exit 1; }
+          release=false
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            [[ "$GITHUB_REF_NAME" == "v$version" ]] || {
+              echo "::error::Tag $GITHUB_REF_NAME does not match app version $version"; exit 1; }
+            release=true
+          elif [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/main ]]; then
+            # A version bump merged to main publishes v$version once; later pushes only build.
+            gh release view "v$version" >/dev/null 2>&1 || release=true
+          fi
+          echo "RELEASE=$release" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=v$version" >> "$GITHUB_ENV"
 
       - name: Build and self-test the app and DMG
         run: |
-          if [[ "$GITHUB_REF_TYPE" == tag ]]; then label="$GITHUB_REF_NAME"; else label="$(git rev-parse --short HEAD)"; fi
+          if [[ "$RELEASE" == true ]]; then label="$RELEASE_TAG"; else label="$(git rev-parse --short HEAD)"; fi
           echo "DMG_NAME=SurgeDisconnectGuard-$label.dmg" >> "$GITHUB_ENV"
           mkdir -p dist
           ./gui/build-dmg.sh "$RUNNER_TEMP/build" "$PWD/dist/SurgeDisconnectGuard-$label.dmg"
@@ -44,13 +56,13 @@ jobs:
           path: dist/${{ env.DMG_NAME }}
           if-no-files-found: error
 
-      - name: Attach DMG to the release
-        if: github.ref_type == 'tag'
+      - name: Publish the release
+        if: env.RELEASE == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" "dist/$DMG_NAME" --clobber
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "dist/$DMG_NAME" --clobber
           else
-            gh release create "$GITHUB_REF_NAME" "dist/$DMG_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+            gh release create "$RELEASE_TAG" "dist/$DMG_NAME" --target "$GITHUB_SHA" --title "$RELEASE_TAG" --generate-notes
           fi
