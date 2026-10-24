@@ -14,7 +14,7 @@ jobs:
   build:
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Run control-flow tests
         run: |
@@ -27,10 +27,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           # The in-app updater only installs a DMG whose app version equals the release tag.
-          version=$(sed -n 's/^VERSION=//p' gui/build-dmg.sh)
-          fallback=$(sed -n 's/^let fallbackAppVersion = "\(.*\)"$/\1/p' gui/Updater.swift)
-          [[ "$fallback" == "$version" ]] || {
-            echo "::error::build-dmg.sh VERSION=$version does not match Updater.swift $fallback"; exit 1; }
+          version=$(tr -d '[:space:]' < VERSION)
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::VERSION must be x.y.z, got '$version'"; exit 1; }
           release=false
           if [[ "$GITHUB_REF_TYPE" == tag ]]; then
             [[ "$GITHUB_REF_NAME" == "v$version" ]] || {
@@ -50,7 +49,7 @@ jobs:
           mkdir -p dist
           ./gui/build-dmg.sh "$RUNNER_TEMP/build" "$PWD/dist/SurgeDisconnectGuard-$label.dmg"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ env.DMG_NAME }}
           path: dist/${{ env.DMG_NAME }}

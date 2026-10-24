@@ -25,7 +25,8 @@ let statePath = stateDirectory + "/locked.json"
 let armedPath = stateDirectory + "/armed.json"
 let processLockPath = stateDirectory + "/operation.lock"
 let fm = FileManager.default
-let featureIntervalMS = 5
+let logPath = "/var/log/surge-disconnect-guard.log"
+let manualLockReason = "用户手动触发断网"
 let featureTimeout: TimeInterval = Double(GuardSettings.defaultTimeoutMS) / 1000
 let publicStatusPath = "/var/run/local.surgedisconnect.guard.status.json"
 
@@ -34,7 +35,7 @@ func publishStatus(_ phase: String, _ message: String, daemonPID: Int32 = 0, tim
     var value: [String: Any] = ["installed": true, "phase": phase, "message": message,
         "boot": fm.fileExists(atPath: stateDirectory + "/boot.enabled") ||
                 fm.fileExists(atPath: "/Library/LaunchDaemons/local.surgedisconnect.guard.plist"),
-        "updatedAt": Date().timeIntervalSince1970, "daemonPID": daemonPID, "version": "2.4.0"]
+        "updatedAt": Date().timeIntervalSince1970, "daemonPID": daemonPID, "version": buildVersion]
     if let timeoutMS = timeoutMS { value["timeoutMS"] = timeoutMS }
     do {
         let data = try JSONSerialization.data(withJSONObject: value)
@@ -51,6 +52,23 @@ struct GuardError: Error, CustomStringConvertible {
 func log(_ text: String) {
     print("\(ISO8601DateFormatter().string(from: Date())) \(text)")
     fflush(stdout)
+}
+
+/// launchd opens the log once; after newsyslog renames it, point stdout/stderr at the new file.
+func reopenLogIfRotated() {
+    var current = stat(), onDisk = stat()
+    guard fstat(STDOUT_FILENO, &current) == 0, current.st_mode & S_IFMT == S_IFREG else { return }
+    if stat(logPath, &onDisk) == 0 && onDisk.st_ino == current.st_ino && onDisk.st_dev == current.st_dev { return }
+    let fd = open(logPath, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW, 0o600)
+    guard fd >= 0 else { return }
+    fflush(stdout)
+    dup2(fd, STDOUT_FILENO)
+    dup2(fd, STDERR_FILENO)
+    close(fd)
+}
+
+func isTunnel(_ name: String) -> Bool {
+    name.hasPrefix("utun") || name.hasPrefix("ppp") || name.hasPrefix("ipsec")
 }
 
 struct Service: Codable, Equatable {
@@ -273,8 +291,11 @@ final class PersistentFeatures {
             if n > 0 { try frames.append(Data(bytes.prefix(n))); continue }
             if n == 0 { throw GuardError("Surge 持续查询连接已断开") }
             guard errno == EAGAIN || errno == EINTR else { throw GuardError("持续查询读取失败：\(errno)") }
-            // Polling the pipe is private to the query queue, never the exit callback.
-            usleep(250)
+            // Sleep in the kernel until the reply arrives instead of waking every few hundred
+            // microseconds. The 50ms cap keeps cancellation responsive.
+            let remaining = (deadline - ProcessInfo.processInfo.systemUptime) * 1000
+            var descriptor = pollfd(fd: output, events: Int16(POLLIN), revents: 0)
+            _ = poll(&descriptor, 1, Int32(min(max(remaining.rounded(.up), 1), 50)))
         }
     }
     func query(timeout: TimeInterval = featureTimeout) throws {
@@ -294,8 +315,9 @@ final class FeatureMonitor {
     let finished = DispatchSemaphore(value: 0)
     var stopped = false
     var ready = false
-    init(gate: FastGate, pids: Set<Int32>, timeoutMS: Int = GuardSettings.defaultTimeoutMS, testCommand: (String, [String])? = nil) throws {
-        let settings = try GuardSettings(timeoutMS: timeoutMS)
+    init(gate: FastGate, pids: Set<Int32>, timeoutMS: Int = GuardSettings.defaultTimeoutMS,
+         intervalMS: Int = GuardSettings.defaultIntervalMS, testCommand: (String, [String])? = nil) throws {
+        let settings = try GuardSettings(timeoutMS: timeoutMS, intervalMS: intervalMS)
         self.gate = gate
         var owners = Set<Int32>()
         for pid in pids {
@@ -315,7 +337,7 @@ final class FeatureMonitor {
                 while !isStopped && gate.trip == nil {
                     for session in sessions { try session.query(timeout: Double(settings.timeoutMS) / 1000) }
                     mutex.lock(); ready = true; mutex.unlock()
-                    _ = sleep.wait(timeout: .now() + .milliseconds(featureIntervalMS))
+                    _ = sleep.wait(timeout: .now() + .milliseconds(settings.intervalMS))
                 }
             } catch {
                 if !isStopped { gate.trigger("Surge 持续模式检查失败：\(error)") }
@@ -359,16 +381,24 @@ final class MacNetwork: NetworkAccess {
             let interfaces = SCNetworkInterfaceCopyAll() as? [SCNetworkInterface] ?? []
             for interface in interfaces where SCNetworkInterfaceGetInterfaceType(interface) == kSCNetworkInterfaceTypeIEEE80211 {
                 guard let name = SCNetworkInterfaceGetBSDName(interface) as String? else { continue }
-                let result = runCommand("/usr/sbin/networksetup", ["-getairportpower", name])
-                guard result.code == 0,
-                      result.text.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix(": On") ||
-                      result.text.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix(": Off") else {
-                    throw GuardError("无法读取 Wi-Fi 电源：\(name) \(result.text)")
-                }
-                wifi[name] = result.text.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix(": On")
+                wifi[name] = try wifiPower(name)
             }
         }
         return NetworkView(services: values, upInterfaces: flags.up, wifi: wifi, allInterfaces: flags.all)
+    }
+    /// Read from the configd store, which costs no process; snapshots run every second.
+    /// networksetup stays as the fallback when the store has no power entry.
+    func wifiPower(_ name: String) throws -> Bool {
+        if let state = SCDynamicStoreCopyValue(nil, "State:/Network/Interface/\(name)/AirPort" as CFString) as? [String: Any],
+           let power = state["Power Status"] as? NSNumber {
+            return power.boolValue
+        }
+        let result = runCommand("/usr/sbin/networksetup", ["-getairportpower", name])
+        let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard result.code == 0, text.hasSuffix(": On") || text.hasSuffix(": Off") else {
+            throw GuardError("无法读取 Wi-Fi 电源：\(name) \(result.text)")
+        }
+        return text.hasSuffix(": On")
     }
     func interfaces() throws -> (all: Set<String>, up: Set<String>) { try interfaceState() }
     func setInterfaces(_ names: Set<String>, up: Bool) -> [String] {
@@ -554,6 +584,9 @@ final class GuardEngine {
     var lastWiFiCheck = Date.distantPast
     var lastError = ""
     var lastErrorDate = Date.distantPast
+    /// With auto-restore on, leave tunnel interfaces alone while locked: they carry nothing once
+    /// physical interfaces and services are off, and Surge's own tunnel must survive to recover.
+    var spareTunnels = false
     // Preference reads and locks are throttled; interface ioctls stay on every tick.
     static let fullEnforceInterval: TimeInterval = 0.1
     var lastFullEnforce: TimeInterval = -.infinity
@@ -565,6 +598,7 @@ final class GuardEngine {
         }
     }
     var locked: Bool { state != nil || corrupted }
+    func cuttable(_ names: Set<String>) -> Set<String> { spareTunnels ? names.filter { !isTunnel($0) } : names }
     func report(_ messages: [String]) {
         let message = messages.joined(separator: "; ")
         if !message.isEmpty && (message != lastError || Date().timeIntervalSince(lastErrorDate) > 30) {
@@ -619,7 +653,7 @@ final class GuardEngine {
                     state = saved
                 }
             }
-            errors += network.setInterfaces(flags.up, up: false)
+            errors += network.setInterfaces(cuttable(flags.up), up: false)
         } catch {
             errors.append("\(error)")
             errors += network.emergencyCutoff()
@@ -643,7 +677,7 @@ final class GuardEngine {
                 state = saved
             }
             // Fast native ioctl closes currently UP interfaces before slower preference operations.
-            errors += network.setInterfaces(quick.upInterfaces, up: false)
+            errors += network.setInterfaces(cuttable(quick.upInterfaces), up: false)
             // Lock the system preferences only when some service still needs disabling.
             let disabled = quick.services.filter { $0.value.enabled }.mapValues { Service(name: $0.name, enabled: false) }
             if !disabled.isEmpty {
@@ -660,7 +694,7 @@ final class GuardEngine {
                         state = saved
                     }
                     errors += network.setWiFi(full.wifi.filter { $0.value }.mapValues { _ in false })
-                    errors += network.setInterfaces(full.upInterfaces, up: false)
+                    errors += network.setInterfaces(cuttable(full.upInterfaces), up: false)
                 } catch { errors.append("\(error)") }
             }
         } catch {
@@ -675,22 +709,29 @@ final class GuardEngine {
         }
         report(errors)
     }
-    func restore() throws {
+    /// raiseTunnels is used by auto-restore only: it also raises tunnels that were up before the
+    /// lock and still exist, so a Surge that stayed running gets its tunnel back.
+    func restore(raiseTunnels: Bool = false) throws {
         if corrupted { throw GuardError("备份不可读，不能自动恢复。请查看说明中的应急恢复步骤。") }
         guard let saved = state else { log("没有断网备份；网络配置未改动。"); return }
         // Restore services by stable UUID, including originally disabled services.
         try network.setServices(saved.services)
         let wifiErrors = network.setWiFi(saved.wifi)
         // Virtual interfaces are recreated by their owning app; never raise stale utun names.
-        let physical = Set(saved.interfaces.filter { $0.value }.keys.filter {
+        var raised = Set(saved.interfaces.filter { $0.value }.keys.filter {
             !$0.hasPrefix("utun") && !$0.hasPrefix("ppp") && $0 != "lo0"
         })
-        let interfaceErrors = network.setInterfaces(physical, up: true)
+        if raiseTunnels, let present = try? network.interfaces().all {
+            raised.formUnion(saved.interfaces.filter { $0.value && isTunnel($0.key) && present.contains($0.key) }.keys)
+        }
+        let interfaceErrors = network.setInterfaces(raised, up: true)
         guard wifiErrors.isEmpty && interfaceErrors.isEmpty else {
             throw GuardError((wifiErrors + interfaceErrors).joined(separator: "; "))
         }
         try store.clear()
         state = nil
+        // The cleared snapshot must be written again on the next arm, not skipped as unchanged.
+        prepared = nil
         log("RESTORED 已恢复断网前的网络服务、Wi-Fi 电源和网卡状态。VPN 可能需要重新连接。")
     }
 }
@@ -734,13 +775,44 @@ func acquireLock(wait: Bool = false) throws -> Int32 {
     return fd
 }
 
+/// Checks off the main loop whether Surge is healthy again, so a lock keeps enforcing meanwhile.
+final class RecoveryProbe {
+    private let queue = DispatchQueue(label: "SurgeGuard.RecoveryProbe", qos: .utility)
+    private let mutex = NSLock()
+    private var running = false
+    private var healthy = 0
+    let check: () -> Bool
+    init(check: @escaping () -> Bool = {
+        guard let pids = try? surgePIDs(), !pids.isEmpty else { return false }
+        do { try requireHealthySurge(pids: pids); return true } catch { return false }
+    }) { self.check = check }
+    /// Consecutive healthy checks so far; starts the next check when none is running.
+    func poll() -> Int {
+        mutex.lock(); defer { mutex.unlock() }
+        if !running {
+            running = true
+            queue.async { [self] in
+                let ok = check()
+                mutex.lock(); healthy = ok ? healthy + 1 : 0; running = false; mutex.unlock()
+            }
+        }
+        return healthy
+    }
+    func reset() { mutex.lock(); healthy = 0; mutex.unlock() }
+    var streak: Int { mutex.lock(); defer { mutex.unlock() }; return healthy }
+    /// Tests only: wait for the check in flight.
+    func settle() { queue.sync {} }
+}
+
 func daemon() throws {
     try requireRoot()
     let fd = try acquireLock()
     defer { close(fd) }
     let network = MacNetwork()
     let engine = GuardEngine(network: network, store: DiskStore())
-    let gate = FastGate(cutoff: { network.emergencyCutoff() })
+    // A gate trips only once; auto-restore re-arms with a fresh one. Callbacks capture the
+    // gate they were armed with, never this variable.
+    var gate = FastGate(cutoff: { network.emergencyCutoff() })
     // Separate queues keep a slow preference query off the process-exit callback.
     let exitQueue = DispatchQueue(label: "SurgeGuard.ProcessExit", qos: .userInteractive, attributes: .concurrent)
     let proxyQueue = DispatchQueue(label: "SurgeGuard.ProxyChanges", qos: .userInteractive)
@@ -748,69 +820,153 @@ func daemon() throws {
     var proxyObserver: ProxyObserver?
     var featureMonitor: FeatureMonitor?
     var loggedReady = false
-    defer { featureMonitor?.stop(); sources.values.forEach { $0.cancel() }; withExtendedLifetime(proxyObserver) {} }
+    // Set after an auto-restore until the system proxy is confirmed and observed again.
+    var proxyDeadline: TimeInterval?
+    func disarm() {
+        featureMonitor?.stop(); featureMonitor = nil
+        sources.values.forEach { $0.cancel() }; sources = [:]
+        proxyObserver = nil; loggedReady = false; proxyDeadline = nil
+    }
+    defer { disarm() }
+    func watch(_ pids: Set<Int32>, _ current: FastGate) {
+        for pid in pids.subtracting(Set(sources.keys)) {
+            let source = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit, queue: exitQueue)
+            source.setEventHandler { current.trigger("收到 Surge 主进程/后台组件退出事件，PID \(pid)") }
+            source.activate()
+            sources[pid] = source
+            log("ARMED 事件监听 Surge PID \(pid)")
+        }
+    }
     var nextSnapshot: TimeInterval = 0
-    var timeoutMS = GuardSettings.defaultTimeoutMS
+    var settings = try GuardSettings()
+    var autoRestore = false
     var lastPublished: TimeInterval = 0
+    var nextSettingsRead: TimeInterval = 0
+    var nextLogCheck: TimeInterval = 0
+    var nextProbe: TimeInterval = 0
+    let probe = RecoveryProbe()
     if !engine.locked {
         do { try engine.prepare(); nextSnapshot = ProcessInfo.processInfo.systemUptime + 1 }
         catch { gate.trigger("无法准备恢复快照：\(error)") }
     } else {
         engine.report(network.emergencyCutoff())
     }
-    do { timeoutMS = try GuardSettings.load().timeoutMS }
-    catch { gate.trigger("无法读取无响应超时设置：\(error)") }
-    log("START 2.4.0 持续连接；正常查询后间隔 5ms、单次查询超时 \(timeoutMS)ms；首次连接最多等待 500ms。")
+    do { settings = try GuardSettings.load(); autoRestore = settings.autoRestore }
+    catch { gate.trigger("无法读取守护设置：\(error)") }
+    log("START \(buildVersion) 持续连接；正常查询后间隔 \(settings.intervalMS)ms、单次查询超时 \(settings.timeoutMS)ms；首次连接最多等待 500ms；自动恢复网络\(autoRestore ? "已开启" : "已关闭")。")
     while true {
+        let now = ProcessInfo.processInfo.systemUptime
+        if now >= nextLogCheck { reopenLogIfRotated(); nextLogCheck = now + 30 }
+        if now >= nextSettingsRead {
+            // The auto-restore switch applies immediately; timeout and interval wait for the next start.
+            nextSettingsRead = now + 1
+            if let saved = try? GuardSettings.load() { autoRestore = saved.autoRestore }
+            engine.spareTunnels = autoRestore && !engine.corrupted && engine.state?.reason != manualLockReason
+        }
         if let trip = gate.trip, !engine.locked { engine.lock(trip.reason, fast: trip) }
         if engine.locked {
-            if ProcessInfo.processInfo.systemUptime - lastPublished >= 1 {
-                publishStatus("locked", engine.state?.reason ?? "恢复备份不可读，已按异常处理", daemonPID: getpid(), timeoutMS: timeoutMS)
-                lastPublished = ProcessInfo.processInfo.systemUptime
+            // A manual lock or an unreadable backup never restores by itself.
+            let recoverable = engine.spareTunnels
+            if !recoverable { probe.reset() }
+            else if now >= nextProbe {
+                nextProbe = now + 1
+                if probe.poll() >= 3 {
+                    probe.reset()
+                    // Arm completely while still locked, then restore: a failure at any step stays cut off.
+                    disarm()
+                    let fresh = FastGate(cutoff: { network.emergencyCutoff() })
+                    gate = fresh
+                    do {
+                        let pids = try surgePIDs()
+                        guard !pids.isEmpty else { throw GuardError("Surge 未运行") }
+                        watch(try surgePIDs(includeComponents: true), fresh)
+                        let monitor = try FeatureMonitor(gate: fresh, pids: pids, timeoutMS: settings.timeoutMS,
+                                                         intervalMS: settings.intervalMS)
+                        featureMonitor = monitor
+                        let deadline = ProcessInfo.processInfo.systemUptime + 2
+                        while !monitor.isReady && fresh.trip == nil && ProcessInfo.processInfo.systemUptime < deadline {
+                            engine.enforceTick()
+                            usleep(10_000)
+                        }
+                        guard monitor.isReady, fresh.trip == nil else {
+                            throw GuardError(fresh.trip?.reason ?? "Surge 持续查询未在 2 秒内就绪")
+                        }
+                        // A process that exited before its source was registered would never fire.
+                        guard Set(sources.keys).isSubset(of: try surgePIDs(includeComponents: true)) else {
+                            throw GuardError("Surge 进程在布防期间退出")
+                        }
+                        try engine.restore(raiseTunnels: true)
+                        log("AUTO-RESTORED Surge 双模式连续 3 次确认正常，已自动恢复网络；确认系统代理后完成布防。")
+                        proxyDeadline = ProcessInfo.processInfo.systemUptime + 15
+                        nextSnapshot = 0
+                        lastPublished = 0
+                    } catch {
+                        log("自动恢复未完成，保持断网，30 秒后再试：\(error)")
+                        disarm()
+                        if engine.locked { engine.enforce() }
+                        nextProbe = ProcessInfo.processInfo.systemUptime + 30
+                    }
+                }
             }
-            engine.enforceTick()
-            usleep(10_000)
-            continue
+            if engine.locked {
+                if ProcessInfo.processInfo.systemUptime - lastPublished >= 1 {
+                    var reason = engine.state?.reason ?? "恢复备份不可读，已按异常处理"
+                    if recoverable { reason += "。Surge 恢复正常后将自动恢复网络。" }
+                    publishStatus("locked", reason, daemonPID: getpid(), timeoutMS: settings.timeoutMS)
+                    lastPublished = ProcessInfo.processInfo.systemUptime
+                }
+                engine.enforceTick()
+                usleep(10_000)
+                continue
+            }
         }
+        let current = gate
         do {
             let pids = try surgePIDs()
             if pids.isEmpty {
-                gate.trigger("未发现 Surge 主进程（退出、崩溃或尚未启动）")
+                current.trigger("未发现 Surge 主进程（退出、崩溃或尚未启动）")
                 continue
             }
             let runtime = try surgePIDs(includeComponents: true)
             if !Set(sources.keys).isSubset(of: runtime) {
-                gate.trigger("被监控的 Surge 主进程或后台组件已消失")
+                current.trigger("被监控的 Surge 主进程或后台组件已消失")
                 continue
             }
-            for pid in runtime.subtracting(Set(sources.keys)) {
-                let source = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit, queue: exitQueue)
-                source.setEventHandler { gate.trigger("收到 Surge 主进程/后台组件退出事件，PID \(pid)") }
-                source.activate()
-                sources[pid] = source
-                log("ARMED 事件监听 Surge PID \(pid)")
-            }
-            if gate.trip != nil { continue }
+            watch(runtime, current)
+            if current.trip != nil { continue }
             if featureMonitor == nil {
-                try requireHealthySurge(pids: pids, cancel: { gate.trip != nil })
-                proxyObserver = try ProxyObserver(gate: gate, queue: proxyQueue)
-                featureMonitor = try FeatureMonitor(gate: gate, pids: pids, timeoutMS: timeoutMS)
+                try requireHealthySurge(pids: pids, cancel: { current.trip != nil })
+                proxyObserver = try ProxyObserver(gate: current, queue: proxyQueue)
+                featureMonitor = try FeatureMonitor(gate: current, pids: pids, timeoutMS: settings.timeoutMS,
+                                                    intervalMS: settings.intervalMS)
+            } else if proxyObserver == nil, let deadline = proxyDeadline {
+                // Services were just re-enabled; the system proxy appears once they come up.
+                if ProxySignature.read() != nil {
+                    proxyObserver = try ProxyObserver(gate: current, queue: proxyQueue)
+                    proxyDeadline = nil
+                    log("REARMED 系统代理已确认，自动恢复后已完整布防。")
+                } else if ProcessInfo.processInfo.systemUptime >= deadline {
+                    current.trigger("自动恢复网络后 15 秒内系统代理仍未生效")
+                    continue
+                }
             }
             if featureMonitor?.isReady == true && !loggedReady {
                 loggedReady = true
                 log("HEALTHY 持续查询已就绪；查询队列与快照写盘、进程检查独立。")
             }
+            let armed = loggedReady && proxyObserver != nil
             if ProcessInfo.processInfo.systemUptime - lastPublished >= 1 {
-                publishStatus(loggedReady ? "protecting" : "starting",
-                    loggedReady ? "增强模式与系统代理已确认开启，持续检查中。" : "正在连接 Surge 并确认双模式状态。", daemonPID: getpid(), timeoutMS: timeoutMS)
+                let message = armed ? "增强模式与系统代理已确认开启，持续检查中。" :
+                    proxyDeadline != nil ? "网络已自动恢复，正在确认系统代理。" : "正在连接 Surge 并确认双模式状态。"
+                publishStatus(armed ? "protecting" : "starting", message, daemonPID: getpid(), timeoutMS: settings.timeoutMS)
                 lastPublished = ProcessInfo.processInfo.systemUptime
             }
-            if gate.trip == nil && ProcessInfo.processInfo.systemUptime >= nextSnapshot {
-                try engine.prepare(ifHealthy: { gate.trip == nil })
+            if current.trip == nil && ProcessInfo.processInfo.systemUptime >= nextSnapshot {
+                try engine.prepare(ifHealthy: { current.trip == nil })
                 nextSnapshot = ProcessInfo.processInfo.systemUptime + 1
             }
-            _ = gate.wakeup.wait(timeout: .now() + .milliseconds(100))
-        } catch { gate.trigger("Surge 运行状态检查失败：\(error)") }
+            _ = current.wakeup.wait(timeout: .now() + .milliseconds(100))
+        } catch { current.trigger("Surge 运行状态检查失败：\(error)") }
     }
 }
 
@@ -1056,6 +1212,29 @@ func selfTest() throws {
     try expect(prefNet.current.upInterfaces.isEmpty, "服务配置失败不影响快速关闭接口")
     do { try pref.restore(); throw GuardError("TEST FAILED: restore should fail") }
     catch { try expect(pref.state != nil, "恢复失败时保留锁定备份") }
+    let spareNet = MemoryNetwork(), spareStore = MemoryStore()
+    let spare = GuardEngine(network: spareNet, store: spareStore)
+    try spare.prepare()
+    spare.spareTunnels = true
+    spare.lock("simulated proxy off")
+    // Surge raises a new tunnel while the network is locked; a cable is plugged in too.
+    spareNet.current.upInterfaces.formUnion(["utun9", "en0"])
+    spareNet.current.allInterfaces.insert("utun9")
+    spare.enforce()
+    try expect(spareNet.current.upInterfaces == ["utun9"], "开启自动恢复时锁定只关闭物理网卡，保留 Surge 隧道")
+    spareNet.current.upInterfaces.insert("en0")
+    spare.lastFullEnforce = ProcessInfo.processInfo.systemUptime
+    spare.enforceTick()
+    try expect(spareNet.current.upInterfaces == ["utun9"], "高频锁定循环同样只关闭物理网卡")
+    try spare.restore(raiseTunnels: true)
+    try expect(spareNet.current.upInterfaces.isSuperset(of: ["en0", "utun88", "utun9"]) &&
+               !spareNet.current.upInterfaces.contains("en2") && spare.prepared == nil && !spare.locked,
+               "自动恢复开启断网前在用且仍存在的隧道，不开原本关闭的网卡，并要求重新写快照")
+    var answers = [true, true, false, true, true, true]
+    let recovery = RecoveryProbe(check: { answers.removeFirst() })
+    var streaks: [Int] = []
+    for _ in 0..<6 { _ = recovery.poll(); recovery.settle(); streaks.append(recovery.streak) }
+    try expect(streaks == [1, 2, 0, 1, 2, 3], "自动恢复只计连续健康检查，中途异常重新计数")
     // Real kernel event test watches a harmless child, not Surge.
     let child = Process()
     child.executableURL = URL(fileURLWithPath: "/bin/sleep")
@@ -1098,14 +1277,15 @@ func latencyTest() throws {
         child.waitUntilExit()
     }
     samples.sort()
-    print("SurgeDisconnectGuard 2.4.0：50 次无害子进程退出事件测试")
+    print("SurgeDisconnectGuard \(buildVersion)：50 次无害子进程退出事件测试")
     print(String(format: "发出退出信号到模拟断网回调开始：P50 %.3f ms；P95 %.3f ms；最大 %.3f ms",
                  samples[24], samples[47], samples[49]))
     print("仅测本机当时负载下的事件响应；断网回调为空。未关闭任何网卡或 Surge，不能作为实际断网耗时或延迟上限。")
 }
 
 func persistentCheck(samples: Int = 1) throws {
-    let timeoutMS = try GuardSettings.load(from: geteuid() == 0 ? GuardSettings.path : GuardSettings.publicPath).timeoutMS
+    let settings = try GuardSettings.load(from: geteuid() == 0 ? GuardSettings.path : GuardSettings.publicPath)
+    let timeoutMS = settings.timeoutMS
     let pids = try surgePIDs()
     guard !pids.isEmpty else { throw GuardError("Surge 未运行") }
     let owners = Set(pids.map { processUID($0) })
@@ -1117,7 +1297,7 @@ func persistentCheck(samples: Int = 1) throws {
             let start = DispatchTime.now().uptimeNanoseconds
             try session.query(timeout: Double(timeoutMS) / 1000)
             times.append(Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000)
-            if samples > 1 { usleep(UInt32(featureIntervalMS * 1000)) }
+            if samples > 1 { usleep(UInt32(settings.intervalMS * 1000)) }
         }
     }
     if samples > 1 {
@@ -1142,12 +1322,15 @@ do {
         try requireRoot()
         let fd = try acquireLock()
         defer { close(fd) }
-        GuardEngine(network: MacNetwork(), store: DiskStore()).lock("用户手动触发断网")
+        GuardEngine(network: MacNetwork(), store: DiskStore()).lock(manualLockReason)
     case "check":
         let pids = try surgePIDs()
         let view = try MacNetwork().view(includeWiFiPower: true)
-        do { print("已保存无响应超时：\(try GuardSettings.load(from: geteuid() == 0 ? GuardSettings.path : GuardSettings.publicPath).timeoutMS)ms（下次开启时读取）") }
-        catch { print("无响应超时配置错误：\(error)") }
+        do {
+            let settings = try GuardSettings.load(from: geteuid() == 0 ? GuardSettings.path : GuardSettings.publicPath)
+            print("已保存无响应超时：\(settings.timeoutMS)ms；查询间隔：\(settings.intervalMS)ms（下次开启时读取）")
+            print("自动恢复网络：\(settings.autoRestore ? "开" : "关")")
+        } catch { print("守护设置错误：\(error)") }
         print("Surge：\(pids.isEmpty ? "未运行" : "运行中，PID " + pids.sorted().map(String.init).joined(separator: ", "))")
         print("监控路径：\(appExecutable)")
         do {
@@ -1181,17 +1364,31 @@ do {
             throw GuardError("界面状态参数无效")
         }
         publishStatus(args[0], args[1])
-    case "settings-set":
+    case "settings-set", "settings-interval", "settings-auto-restore":
         try requireRoot()
+        let command = CommandLine.arguments[1]
         let args = Array(CommandLine.arguments.dropFirst(2))
-        guard args.count == 1 else { throw GuardError("超时参数无效") }
-        let settings = try GuardSettings(timeoutMS: GuardSettings.parse(args[0]))
+        guard args.count == 1 else { throw GuardError("设置参数无效") }
+        // Change one value and keep the others; an unreadable file is replaced by defaults.
+        let saved = try (try? GuardSettings.load()) ?? GuardSettings()
+        let settings: GuardSettings
+        switch command {
+        case "settings-set": settings = try saved.with(timeoutMS: GuardSettings.parse(args[0]))
+        case "settings-interval": settings = try saved.with(intervalMS: GuardSettings.parseInterval(args[0]))
+        default:
+            guard ["on", "off"].contains(args[0]) else { throw GuardError("自动恢复参数只能是 on 或 off") }
+            settings = try saved.with(autoRestore: args[0] == "on")
+        }
         try settings.save(to: GuardSettings.path)
         try settings.save(to: GuardSettings.publicPath, permissions: 0o644)
-        print("已保存无响应超时 \(settings.timeoutMS)ms；下次开启守护生效。当前守护未重启。")
+        switch command {
+        case "settings-set": print("已保存无响应超时 \(settings.timeoutMS)ms；下次开启守护生效。当前守护未重启。")
+        case "settings-interval": print("已保存查询间隔 \(settings.intervalMS)ms；下次开启守护生效。当前守护未重启。")
+        default: print(settings.autoRestore ? "已开启自动恢复网络，立即生效。" : "已关闭自动恢复网络，立即生效。")
+        }
     case "self-test": try selfTest()
     default:
-        print("SurgeDisconnectGuard 2.4.0 — daemon | check | health-check | persistent-check | self-test | latency-test | query-latency-test | observer-check | restore | lock | settings-set <ms>")
+        print("SurgeDisconnectGuard \(buildVersion) — daemon | check | health-check | persistent-check | self-test | latency-test | query-latency-test | observer-check | restore | lock | settings-set <ms> | settings-interval <ms> | settings-auto-restore on|off")
     }
 } catch {
     fputs("错误：\(error)\n", stderr)

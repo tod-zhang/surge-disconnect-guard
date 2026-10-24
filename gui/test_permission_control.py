@@ -134,6 +134,34 @@ esac
         self.assertTrue((self.base / 'loaded').exists())
         self.assertEqual((self.base / 'config-ms').read_text(), '850')
 
+    def test_auto_restore_switch_applies_without_restart(self):
+        self.prepare(); self.call('enable'); self.trace.write_text('')
+        self.command('control-actions.sh', ['setAutoRestore', 'on', 'on'])
+        self.assertEqual((self.base / 'config-auto').read_text(), 'on')
+        self.command('control-actions.sh', ['setAutoRestore', 'on', 'maybe'], success=False)
+        self.assertEqual((self.base / 'config-auto').read_text(), 'on')
+        self.assertTrue((self.base / 'loaded').exists())
+        self.assertNotIn('bootout', self.trace.read_text())
+        self.assertNotIn('guard restore', self.trace.read_text())
+
+    def test_save_interval_keeps_running_guard(self):
+        self.prepare(); self.call('enable'); self.trace.write_text('')
+        self.command('control-actions.sh', ['setInterval', 'on', '50'])
+        self.assertEqual((self.base / 'config-interval').read_text(), '50')
+        self.command('control-actions.sh', ['setInterval', 'on', '4'], success=False)
+        self.assertEqual((self.base / 'config-interval').read_text(), '50')
+        self.assertTrue((self.base / 'loaded').exists())
+        self.assertNotIn('guard restore', self.trace.read_text())
+
+    def test_enable_applies_all_settings_before_preflight(self):
+        self.prepare(); self.command('install-control.sh', ['12345']); self.trace.write_text('')
+        self.command('control-actions.sh', ['enable', 'off', '850', '30', 'on'])
+        trace = self.trace.read_text()
+        for line in ['guard settings-set 850', 'guard settings-interval 30', 'guard settings-auto-restore on']:
+            self.assertLess(trace.index(line), trace.index('guard health-check'))
+        self.assertEqual((self.base / 'config-interval').read_text(), '30')
+        self.assertEqual((self.base / 'config-auto').read_text(), 'on')
+
     def test_invalid_timeout_does_not_stop_running_guard(self):
         self.prepare(); self.call('enable')
         self.command('control-actions.sh', ['setTimeout', 'on', '0'], success=False)

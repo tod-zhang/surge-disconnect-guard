@@ -4,26 +4,31 @@ GUI=$(cd -- "$(dirname -- "$0")" && pwd -P)
 BASE=$(cd -- "$GUI/.." && pwd -P)
 WORK=${1:?请传入中间构建目录的绝对路径}
 OUTPUT=${2:?请传入输出 DMG 的绝对路径}
-# App version; the detection engine and privileged helper keep their own version (2.4.0).
-VERSION=2.6.1
-BUILD_NUMBER=261
+# VERSION at the repository root is the only place the version is written. The app,
+# detection engine and privileged helper all carry it; the build number is derived from it.
+VERSION=$(tr -d '[:space:]' < "$BASE/VERSION")
+[[ "$VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || { echo "VERSION 格式应为 x.y.z：$VERSION" >&2; exit 1; }
+BUILD_NUMBER=$((BASH_REMATCH[1] * 10000 + BASH_REMATCH[2] * 100 + BASH_REMATCH[3]))
 APP="$WORK/Surge 断网守护.app"
 STAGE="$WORK/dmg-root"
 mkdir -p "$WORK" "$APP/Contents/MacOS" "$APP/Contents/Resources/engine" "$STAGE"
+printf 'let buildVersion = "%s"\n' "$VERSION" > "$WORK/BuildVersion.swift"
 xcrun clang -target arm64-apple-macosx13.0 -Wall -Wextra -Werror -c "$BASE/native.c" -o "$WORK/native.o"
-xcrun swiftc -parse-as-library -target arm64-apple-macosx13.0 -O -warnings-as-errors "$BASE/GuardSettings.swift" "$BASE/SurgeGuard.swift" "$WORK/native.o" -o "$WORK/surge-guard"
+xcrun swiftc -parse-as-library -target arm64-apple-macosx13.0 -O -warnings-as-errors "$WORK/BuildVersion.swift" "$BASE/GuardSettings.swift" "$BASE/SurgeGuard.swift" "$WORK/native.o" -o "$WORK/surge-guard"
 "$WORK/surge-guard" self-test
-xcrun swiftc -parse-as-library -target arm64-apple-macosx13.0 -O -warnings-as-errors "$BASE/GuardSettings.swift" "$GUI/ControlIPC.swift" "$GUI/GuardUI.swift" "$GUI/Updater.swift" "$GUI/Alerts.swift" -o "$APP/Contents/MacOS/SurgeGuardUI"
+xcrun swiftc -parse-as-library -target arm64-apple-macosx13.0 -O -warnings-as-errors "$WORK/BuildVersion.swift" "$BASE/GuardSettings.swift" "$GUI/ControlIPC.swift" "$GUI/GuardUI.swift" "$GUI/Updater.swift" "$GUI/Alerts.swift" -o "$APP/Contents/MacOS/SurgeGuardUI"
 "$APP/Contents/MacOS/SurgeGuardUI" --self-test
 install -m 755 "$WORK/surge-guard" "$APP/Contents/Resources/engine/surge-guard"
 install -m 755 "$WORK/surge-guard" "$BASE/surge-guard"
 install -m 755 "$BASE/sgctl" "$APP/Contents/Resources/engine/sgctl"
+install -m 644 "$BASE/local.surgedisconnect.newsyslog.conf" "$APP/Contents/Resources/engine/local.surgedisconnect.newsyslog.conf"
+printf '%s\n' "$VERSION" > "$APP/Contents/Resources/engine/VERSION"
 install -m 644 "$BASE/local.surgedisconnect.guard.plist" "$APP/Contents/Resources/engine/local.surgedisconnect.guard.plist"
 install -m 755 "$GUI/gui-control.sh" "$APP/Contents/Resources/gui-control.sh"
 install -m 755 "$GUI/install-control.sh" "$APP/Contents/Resources/install-control.sh"
 install -m 755 "$GUI/control-actions.sh" "$APP/Contents/Resources/control-actions.sh"
 install -m 644 "$GUI/local.surgedisconnect.control.plist" "$APP/Contents/Resources/local.surgedisconnect.control.plist"
-xcrun swiftc -parse-as-library -target arm64-apple-macosx13.0 -O -warnings-as-errors "$BASE/GuardSettings.swift" "$GUI/ControlIPC.swift" "$GUI/ControlService.swift" "$GUI/ControlSelfTest.swift" "$WORK/native.o" -o "$APP/Contents/Resources/engine/sg-control"
+xcrun swiftc -parse-as-library -target arm64-apple-macosx13.0 -O -warnings-as-errors "$WORK/BuildVersion.swift" "$BASE/GuardSettings.swift" "$GUI/ControlIPC.swift" "$GUI/ControlService.swift" "$GUI/ControlSelfTest.swift" "$WORK/native.o" -o "$APP/Contents/Resources/engine/sg-control"
 codesign --force --sign - --identifier local.surgedisconnect.control "$APP/Contents/Resources/engine/sg-control"
 "$APP/Contents/Resources/engine/sg-control" self-test
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -59,7 +64,7 @@ codesign --force --sign - "$APP"
 codesign --verify --deep --strict "$APP"
 ditto "$APP" "$STAGE/Surge 断网守护.app"
 [[ -L "$STAGE/Applications" ]] || ln -s /Applications "$STAGE/Applications"
-cp "$GUI/DMG安装说明.txt" "$STAGE/安装说明.txt"
+sed "s/@VERSION@/$VERSION/g" "$GUI/DMG安装说明.txt" > "$STAGE/安装说明.txt"
 hdiutil create -volname "Surge 断网守护 $VERSION" -fs HFS+ -srcfolder "$STAGE" -format UDZO -ov "$OUTPUT"
 hdiutil verify "$OUTPUT"
 echo "已生成：$OUTPUT"

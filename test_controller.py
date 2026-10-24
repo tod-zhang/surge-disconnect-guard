@@ -24,6 +24,7 @@ class ControllerTests(unittest.TestCase):
         assert old_root in source and old_path in source and old_plist in source and old_run in source
         source = source.replace(old_root, "ROOT='" + str(self.root) + "'")
         source = source.replace(old_run, "RUN_DIR='" + str(self.base) + "'")
+        source = source.replace("NEWSYSLOG_CONF='/etc/newsyslog.d/local.surgedisconnect.conf'", "NEWSYSLOG_CONF='" + str(self.base) + "/newsyslog.conf'")
         source = source.replace(old_path, "export PATH='" + str(self.mock) + ":/usr/bin:/bin:/usr/sbin:/sbin'")
         source = source.replace(old_plist, 'PLIST="' + str(self.base) + '/$LABEL.plist"')
         self.script = self.base / "controller"
