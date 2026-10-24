@@ -694,7 +694,7 @@ private struct PlanetView: View {
                 }
             case .locked:
                 // > <
-                let dir = CGFloat(side)
+                let dir = CGFloat(-side)
                 features.move(to: CGPoint(x: eye.x - s * dir, y: eye.y - s * 0.7))
                 features.addLine(to: CGPoint(x: eye.x + s * dir, y: eye.y))
                 features.addLine(to: CGPoint(x: eye.x - s * dir, y: eye.y + s * 0.7))
