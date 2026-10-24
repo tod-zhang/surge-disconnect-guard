@@ -235,6 +235,13 @@ final class GuardModel: ObservableObject {
 
 private enum GuardPage: String, CaseIterable {
     case overview = "守护", settings = "设置", diagnostics = "诊断"
+    var shortcut: KeyEquivalent {
+        switch self {
+        case .overview: return "1"
+        case .settings: return "2"
+        case .diagnostics: return "3"
+        }
+    }
 }
 
 private enum GuardPalette {
@@ -243,6 +250,142 @@ private enum GuardPalette {
     static let gold = Color(red: 0.86, green: 0.75, blue: 0.48)
     static let secondary = Color.white.opacity(0.56)
     static let subtle = Color.white.opacity(0.34)
+    static let space = Color(red: 0.045, green: 0.05, blue: 0.075)
+    static let spaceLift = Color(red: 0.075, green: 0.085, blue: 0.115)
+}
+
+/// Each protection state is drawn as its own planet: Earth while guarding, Mars when locked,
+/// a sun-like star while the state is unconfirmed, and grey Mercury when idle.
+private struct PlanetStyle {
+    var highlight: Color
+    var base: Color
+    var shade: Color
+    var glow: Color
+    var glowStrength: Double
+    var moon: Bool
+    var pulse: Bool
+    init(_ indicator: GuardIndicator) {
+        switch indicator {
+        case .protecting:
+            highlight = Color(red: 0.70, green: 0.97, blue: 0.88); base = Color(red: 0.20, green: 0.64, blue: 0.58)
+            shade = Color(red: 0.03, green: 0.14, blue: 0.20); glow = GuardPalette.mint
+            glowStrength = 0.42; moon = true; pulse = false
+        case .locked:
+            highlight = Color(red: 1.00, green: 0.80, blue: 0.62); base = Color(red: 0.86, green: 0.40, blue: 0.22)
+            shade = Color(red: 0.24, green: 0.06, blue: 0.05); glow = Color(red: 1, green: 0.52, blue: 0.30)
+            glowStrength = 0.40; moon = false; pulse = false
+        case .attention:
+            highlight = Color(red: 1.00, green: 0.96, blue: 0.74); base = Color(red: 0.94, green: 0.73, blue: 0.26)
+            shade = Color(red: 0.34, green: 0.19, blue: 0.04); glow = Color(red: 1, green: 0.82, blue: 0.36)
+            glowStrength = 0.46; moon = false; pulse = true
+        case .inactive:
+            highlight = Color(red: 0.82, green: 0.84, blue: 0.86); base = Color(red: 0.44, green: 0.47, blue: 0.51)
+            shade = Color(red: 0.09, green: 0.10, blue: 0.12); glow = Color(red: 0.70, green: 0.76, blue: 0.82)
+            glowStrength = 0.14; moon = false; pulse = false
+        }
+    }
+}
+
+private struct PlanetView: View {
+    var indicator: GuardIndicator
+    var animated: Bool
+    var body: some View {
+        let style = PlanetStyle(indicator)
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !animated)) { timeline in
+            Canvas { context, size in
+                PlanetView.draw(in: &context, size: size, style: style,
+                                time: timeline.date.timeIntervalSinceReferenceDate, active: indicator != .inactive)
+            }
+        }.accessibilityHidden(true)
+    }
+
+    private static func draw(in context: inout GraphicsContext, size: CGSize, style: PlanetStyle, time: Double, active: Bool) {
+        let center = CGPoint(x: size.width / 2, y: size.height / 2)
+        let radius = min(size.width, size.height) * 0.30
+        let pulse = style.pulse ? 0.82 + 0.18 * sin(time * 2.2) : 1
+        func circle(_ point: CGPoint, _ r: CGFloat) -> Path {
+            Path(ellipseIn: CGRect(x: point.x - r, y: point.y - r, width: r * 2, height: r * 2))
+        }
+
+        // Atmosphere glow.
+        context.drawLayer { layer in
+            layer.addFilter(.blur(radius: radius * 0.42))
+            layer.fill(circle(center, radius * 1.18), with: .color(style.glow.opacity(style.glowStrength * pulse)))
+        }
+
+        // Orbit: a tilted ellipse whose back half passes behind the planet.
+        let tilt = CGAffineTransform(rotationAngle: -0.24)
+        let orbitX = radius * 1.78, orbitY = radius * 0.46
+        func orbitPoint(_ angle: Double) -> CGPoint {
+            let raw = CGPoint(x: orbitX * CGFloat(cos(angle)), y: orbitY * CGFloat(sin(angle))).applying(tilt)
+            return CGPoint(x: raw.x + center.x, y: raw.y + center.y)
+        }
+        func orbitArc(from start: Double, to end: Double) -> Path {
+            var path = Path()
+            let steps = 64
+            for step in 0...steps {
+                let point = orbitPoint(start + (end - start) * Double(step) / Double(steps))
+                if step == 0 { path.move(to: point) } else { path.addLine(to: point) }
+            }
+            return path
+        }
+        let orbitColor = Color.white.opacity(active ? 0.16 : 0.08)
+        let dash: [CGFloat] = active ? [] : [3, 5]
+        context.stroke(orbitArc(from: .pi, to: 2 * .pi), with: .color(orbitColor), style: StrokeStyle(lineWidth: 1, dash: dash))
+
+        let moonAngle = time * 0.55
+        let moonPoint = orbitPoint(moonAngle)
+        let moonInFront = sin(moonAngle) > 0
+        func drawMoon(_ context: inout GraphicsContext) {
+            let r = radius * 0.11
+            context.fill(circle(moonPoint, r), with: .radialGradient(
+                Gradient(colors: [Color.white, Color(red: 0.70, green: 0.74, blue: 0.80), Color(red: 0.22, green: 0.24, blue: 0.30)]),
+                center: CGPoint(x: moonPoint.x - r * 0.4, y: moonPoint.y - r * 0.4), startRadius: 0, endRadius: r * 1.8))
+        }
+        if style.moon && !moonInFront { drawMoon(&context) }
+
+        // Planet body with drifting surface bands and a soft terminator.
+        let body = circle(center, radius)
+        context.fill(body, with: .radialGradient(
+            Gradient(colors: [style.highlight, style.base, style.shade]),
+            center: CGPoint(x: center.x - radius * 0.38, y: center.y - radius * 0.42), startRadius: 0, endRadius: radius * 1.75))
+        context.drawLayer { layer in
+            layer.clip(to: body)
+            for band in 0..<5 {
+                let drift = CGFloat(sin(time * 0.18 + Double(band) * 1.7)) * radius * 0.10
+                let y = center.y - radius * 0.78 + CGFloat(band) * radius * 0.36
+                let height = radius * (band % 2 == 0 ? 0.13 : 0.08)
+                layer.fill(Path(ellipseIn: CGRect(x: center.x - radius * 1.4 + drift, y: y, width: radius * 2.8, height: height)),
+                           with: .color(Color.white.opacity(active ? 0.075 : 0.04)))
+            }
+            layer.fill(body, with: .linearGradient(
+                Gradient(colors: [Color.clear, Color.black.opacity(0.50)]),
+                startPoint: CGPoint(x: center.x - radius * 0.15, y: center.y - radius * 0.15),
+                endPoint: CGPoint(x: center.x + radius, y: center.y + radius)))
+        }
+        context.stroke(body, with: .color(Color.white.opacity(0.10)), lineWidth: 1)
+
+        context.stroke(orbitArc(from: 0, to: .pi), with: .color(orbitColor), style: StrokeStyle(lineWidth: 1, dash: dash))
+        if style.moon && moonInFront { drawMoon(&context) }
+    }
+}
+
+private struct Starfield: View {
+    var body: some View {
+        Canvas { context, size in
+            var seed: UInt64 = 0x5EED_2300
+            func next() -> CGFloat {
+                seed = seed &* 6364136223846793005 &+ 1442695040888963407
+                return CGFloat(seed >> 33) / CGFloat(UInt32.max >> 1)
+            }
+            for _ in 0..<110 {
+                let x = next() * size.width, y = next() * size.height
+                let r = 0.35 + next() * 0.9
+                let alpha = 0.06 + Double(next()) * 0.32
+                context.fill(Path(ellipseIn: CGRect(x: x, y: y, width: r * 2, height: r * 2)), with: .color(Color.white.opacity(alpha)))
+            }
+        }.allowsHitTesting(false).accessibilityHidden(true)
+    }
 }
 
 private struct WindowMaterial: NSViewRepresentable {
@@ -261,56 +404,100 @@ private struct GlassPanel: ViewModifier {
     var radius: CGFloat = 20
     func body(content: Content) -> some View {
         content
-            .background(RoundedRectangle(cornerRadius: radius).fill(.white.opacity(0.045)))
+            .background(RoundedRectangle(cornerRadius: radius).fill(Color.white.opacity(0.04)))
             .overlay(RoundedRectangle(cornerRadius: radius).strokeBorder(
-                LinearGradient(colors: [.white.opacity(0.15), .white.opacity(0.055)], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1))
+                LinearGradient(colors: [Color.white.opacity(0.13), Color.white.opacity(0.04)], startPoint: .top, endPoint: .bottom), lineWidth: 1))
     }
 }
-private struct SoftButton: ButtonStyle {
+
+/// Capsule button that lifts slightly on hover, in the spirit of a single clear call to action.
+private struct PillButton: ButtonStyle {
     var prominent = false
+    var tint: Color = .white
+    func makeBody(configuration: Configuration) -> some View {
+        PillBody(configuration: configuration, prominent: prominent, tint: tint)
+    }
+    private struct PillBody: View {
+        let configuration: ButtonStyleConfiguration
+        let prominent: Bool
+        let tint: Color
+        @State private var hovering = false
+        @Environment(\.isEnabled) private var isEnabled
+        var body: some View {
+            configuration.label
+                .font(.system(size: 13, weight: .semibold))
+                .padding(.horizontal, 20).frame(height: 40)
+                .foregroundStyle(prominent ? Color.black.opacity(0.86) : Color.white.opacity(0.88))
+                .background(Capsule().fill(prominent ? tint : Color.white.opacity(configuration.isPressed ? 0.14 : hovering ? 0.10 : 0.065)))
+                .overlay(Capsule().strokeBorder(Color.white.opacity(prominent ? 0 : 0.10), lineWidth: 1))
+                .shadow(color: prominent ? tint.opacity(hovering ? 0.30 : 0.14) : Color.clear, radius: hovering ? 18 : 10, y: 4)
+                .contentShape(Capsule())
+                .scaleEffect(configuration.isPressed ? 0.97 : (hovering && isEnabled ? 1.02 : 1))
+                .opacity(isEnabled ? 1 : 0.45)
+                .animation(.easeOut(duration: 0.15), value: hovering)
+                .animation(.easeOut(duration: 0.10), value: configuration.isPressed)
+                .onHover { hovering = $0 }
+        }
+    }
+}
+
+/// Plain text-like button that brightens on hover.
+private struct HoverLink: ButtonStyle {
     var tint: Color = GuardPalette.mint
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 13, weight: .semibold))
-            .padding(.horizontal, 19).frame(height: 40)
-            .foregroundStyle(prominent ? Color(red: 0.08, green: 0.17, blue: 0.14) : Color.white.opacity(0.86))
-            .background(RoundedRectangle(cornerRadius: 12).fill(prominent ? tint : .white.opacity(configuration.isPressed ? 0.12 : 0.07)))
-            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.white.opacity(prominent ? 0.20 : 0.09), lineWidth: 1))
-            .opacity(configuration.isPressed ? 0.80 : 1)
-            .scaleEffect(configuration.isPressed ? 0.985 : 1)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+        HoverLinkBody(configuration: configuration, tint: tint)
+    }
+    private struct HoverLinkBody: View {
+        let configuration: ButtonStyleConfiguration
+        let tint: Color
+        @State private var hovering = false
+        var body: some View {
+            configuration.label
+                .foregroundStyle(tint.opacity(configuration.isPressed ? 0.6 : hovering ? 1 : 0.82))
+                .contentShape(Rectangle())
+                .onHover { hovering = $0 }
+        }
     }
 }
 
 struct GuardView: View {
     @StateObject private var model: GuardModel
     @State private var page: GuardPage = .overview
+    @State private var hoveredTab: GuardPage?
+    @State private var hoveringBoot = false
+    @Namespace private var tabSelection
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     init(model: GuardModel = GuardModel()) { _model = StateObject(wrappedValue: model) }
 
+    private var indicator: GuardIndicator { GuardIndicator(phase: model.phase) }
     private var accent: Color {
         ["disabled", "uninstalled"].contains(model.phase) ? GuardPalette.mint : model.color
     }
     private var summary: String {
         switch model.phase {
-        case "protecting": return "双模式已确认开启。Surge 退出或状态异常时，\n自动锁定本机网络。"
-        case "disabled": return "网络已按备份恢复。\n准备好后，可随时重新开启守护。"
-        case "locked": return "已触发断网保护。\n查看诊断，或关闭守护并恢复网络。"
-        case "starting": return "正在确认增强模式与系统代理。\n请稍候，状态会自动更新。"
-        case "unknown", "error": return "暂时无法确认后台状态。\n查看诊断，或关闭守护并恢复网络。"
-        default: return "在 Surge 异常时自动锁网。\n开启前，请同时打开增强模式与系统代理。"
+        case "protecting": return "增强模式与系统代理均已确认。Surge 退出或状态异常时，自动锁定本机网络。"
+        case "disabled": return "网络已按备份恢复。准备好后，可随时重新开启守护。"
+        case "locked": return "已触发断网保护。查看诊断，或关闭守护并恢复网络。"
+        case "starting": return "正在确认增强模式与系统代理，状态会自动更新。"
+        case "unknown", "error": return "暂时无法确认后台状态。查看诊断，或关闭守护并恢复网络。"
+        default: return "Surge 异常时自动锁网。开启前，请同时打开增强模式与系统代理。"
         }
+    }
+    private func go(_ target: GuardPage) {
+        withAnimation(reduceMotion ? nil : .spring(response: 0.34, dampingFraction: 0.86)) { page = target }
     }
     var body: some View {
         ZStack {
             WindowMaterial().ignoresSafeArea()
-            LinearGradient(colors: [Color(red: 0.10, green: 0.14, blue: 0.16).opacity(0.86),
-                                    Color(red: 0.09, green: 0.105, blue: 0.12).opacity(0.94)],
-                           startPoint: .topLeading, endPoint: .bottomTrailing).ignoresSafeArea()
-            RadialGradient(colors: [accent.opacity(0.075), .clear], center: .topTrailing,
-                           startRadius: 10, endRadius: 560).ignoresSafeArea()
+            LinearGradient(colors: [GuardPalette.spaceLift.opacity(0.95), GuardPalette.space.opacity(0.98)],
+                           startPoint: .top, endPoint: .bottom).ignoresSafeArea()
+            RadialGradient(colors: [accent.opacity(page == .overview ? 0.12 : 0.05), .clear], center: UnitPoint(x: 0.5, y: 0.36),
+                           startRadius: 10, endRadius: 430).ignoresSafeArea()
+                .animation(reduceMotion ? nil : .easeInOut(duration: 0.6), value: model.phase)
+                .animation(reduceMotion ? nil : .easeInOut(duration: 0.3), value: page)
+            Starfield().ignoresSafeArea()
             VStack(spacing: 0) {
-                navigation.frame(height: 86)
+                navigation.frame(height: 78)
                 Group {
                     switch page {
                     case .overview: overview
@@ -318,7 +505,8 @@ struct GuardView: View {
                     case .diagnostics: diagnostics
                     }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                    .padding(.horizontal, 28).padding(.bottom, 20)
+                    .padding(.horizontal, 28).padding(.bottom, 16)
+                    .transition(reduceMotion ? AnyTransition.opacity : AnyTransition.opacity.combined(with: .offset(y: 10)))
                 footer
             }
         }
@@ -329,145 +517,134 @@ struct GuardView: View {
     }
 
     private var navigation: some View {
-        HStack {
-            Spacer()
-            HStack(spacing: 5) {
-                Image(systemName: "shield.lefthalf.filled")
-                    .font(.system(size: 18, weight: .medium)).foregroundStyle(GuardPalette.mint)
-                    .frame(width: 38, height: 38)
-                    .background(.white.opacity(0.07), in: Circle())
-                    .padding(.trailing, 7)
-                    .accessibilityLabel("Surge 断网守护")
+        ZStack {
+            HStack(spacing: 2) {
                 ForEach(GuardPage.allCases, id: \.self) { item in
-                    Button {
-                        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.16)) { page = item }
-                    } label: {
-                        Text(item.rawValue).font(.system(size: 13, weight: .semibold))
-                            .frame(width: 76, height: 36)
-                            .foregroundStyle(page == item ? Color.black.opacity(0.88) : Color.white.opacity(0.55))
-                            .background {
-                                if page == item { Capsule().fill(.white.opacity(0.96)).shadow(color: .black.opacity(0.16), radius: 5, y: 2) }
+                    Button { go(item) } label: {
+                        HStack(spacing: 7) {
+                            Circle().fill(tabDot(item)).frame(width: 6, height: 6)
+                                .opacity(page == item ? 1 : 0.7)
+                            Text(item.rawValue).font(.system(size: 13, weight: .semibold))
+                        }
+                        .frame(width: 92, height: 34)
+                        .foregroundStyle(page == item ? Color.black.opacity(0.88) : Color.white.opacity(hoveredTab == item ? 0.86 : 0.55))
+                        .background {
+                            if page == item {
+                                Capsule().fill(Color.white.opacity(0.96))
+                                    .shadow(color: .black.opacity(0.20), radius: 6, y: 2)
+                                    .matchedGeometryEffect(id: "tab", in: tabSelection)
+                            } else if hoveredTab == item {
+                                Capsule().fill(Color.white.opacity(0.06))
                             }
-                            .contentShape(Capsule())
+                        }
+                        .contentShape(Capsule())
                     }.buttonStyle(.plain)
+                        .keyboardShortcut(item.shortcut, modifiers: .command)
+                        .help(item.rawValue + "（⌘" + String(item.shortcut.character) + "）")
+                        .onHover { inside in hoveredTab = inside ? item : (hoveredTab == item ? nil : hoveredTab) }
                         .accessibilityIdentifier("tab-" + item.rawValue)
                         .accessibilityAddTraits(page == item ? [.isSelected] : [])
                 }
-            }.padding(6).background(.white.opacity(0.055), in: Capsule())
-                .overlay(Capsule().strokeBorder(.white.opacity(0.10), lineWidth: 1))
-            Spacer()
-        }.padding(.top, 5)
-    }
-
-    private var overview: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("保护概览").font(.system(size: 21, weight: .semibold))
-                    Text("本机网络的保护状态。").font(.system(size: 12)).foregroundStyle(GuardPalette.secondary)
+            }.padding(5).background(Color.white.opacity(0.05), in: Capsule())
+                .overlay(Capsule().strokeBorder(Color.white.opacity(0.09), lineWidth: 1))
+            HStack {
+                Spacer()
+                if model.preview {
+                    Label("安全预览", systemImage: "eye")
+                        .font(.system(size: 11, weight: .medium)).foregroundStyle(GuardPalette.secondary)
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .background(Color.white.opacity(0.05), in: Capsule())
+                        .help("所有按钮只模拟状态，不安装组件，也不修改网络。")
                 }
-                Spacer()
-                Label(model.preview ? "安全预览" : "本机守护", systemImage: model.preview ? "eye" : "desktopcomputer")
-                    .font(.system(size: 11, weight: .medium)).foregroundStyle(GuardPalette.secondary)
-                    .padding(.horizontal, 10).padding(.vertical, 6)
-                    .background(.white.opacity(0.05), in: Capsule())
-            }.padding(.bottom, 3)
-            HStack(spacing: 0) {
-                VStack(alignment: .leading, spacing: 0) {
-                    HStack(spacing: 7) {
-                        Circle().fill(model.color).frame(width: 6, height: 6)
-                        Text("网络保护").font(.system(size: 11, weight: .semibold)).tracking(1)
-                            .foregroundStyle(GuardPalette.secondary)
-                        if model.busy { ProgressView().controlSize(.mini).tint(accent) }
-                    }.padding(.bottom, 14)
-                    Text(model.title).font(.system(size: 34, weight: .semibold)).tracking(-0.8)
-                        .lineLimit(1).minimumScaleFactor(0.75)
-                    Text(summary).font(.system(size: 13)).foregroundStyle(GuardPalette.secondary)
-                        .lineSpacing(5).padding(.top, 12).fixedSize(horizontal: false, vertical: true)
-                    Spacer(minLength: 18)
-                    Button { model.perform(model.primaryAction) } label: {
-                        HStack(spacing: 9) {
-                            Image(systemName: model.primaryAction == "enable" ? "power" : "network")
-                            Text(model.primaryTitle)
-                            Spacer(minLength: 3)
-                            Image(systemName: "arrow.right").font(.system(size: 11, weight: .semibold))
-                        }.frame(width: 194)
-                    }.buttonStyle(SoftButton(prominent: model.primaryAction == "enable", tint: accent))
-                        .disabled(model.busy).opacity(model.busy ? 0.5 : 1)
-                        .accessibilityIdentifier(model.primaryAction == "enable" ? "enableGuard" : "disableGuard")
-                }.frame(maxWidth: .infinity, alignment: .leading)
-                shieldArtwork.frame(width: 258)
-            }.padding(27).frame(height: 264).modifier(GlassPanel())
-            HStack(spacing: 14) {
-                modeCard("增强模式", icon: "square.3.layers.3d", tint: GuardPalette.mint)
-                modeCard("系统代理", icon: "network", tint: GuardPalette.blue)
-                Button { page = .settings } label: {
-                    VStack(alignment: .leading, spacing: 15) {
-                        HStack {
-                            Label("开机守护", systemImage: "sunrise").font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(GuardPalette.gold)
-                            Spacer()
-                            Image(systemName: "arrow.up.right").font(.system(size: 10, weight: .medium)).foregroundStyle(GuardPalette.subtle)
-                        }
-                        Text(model.boot ? "已开启" : "未开启").font(.system(size: 22, weight: .semibold))
-                        Text(model.boot ? "系统启动时自动布防" : "由你手动开启保护")
-                            .font(.system(size: 11)).foregroundStyle(GuardPalette.secondary)
-                    }.frame(maxWidth: .infinity, alignment: .leading).padding(19).modifier(GlassPanel(radius: 17))
-                }.buttonStyle(.plain).accessibilityIdentifier("openBootSettings")
-            }
-            HStack(spacing: 7) {
-                Image(systemName: "lock.shield").foregroundStyle(GuardPalette.subtle)
-                Text("异常后保持网络锁定，需手动关闭守护并恢复。")
-                    .foregroundStyle(GuardPalette.secondary)
-                Spacer()
-                Button("了解设置") { page = .settings }.buttonStyle(.plain).foregroundStyle(GuardPalette.mint)
-            }.font(.system(size: 11)).padding(.horizontal, 3).padding(.top, 3)
+            }.padding(.horizontal, 28)
+        }.padding(.top, 8)
+    }
+    private func tabDot(_ item: GuardPage) -> Color {
+        switch item {
+        case .overview: return model.color
+        case .settings: return GuardPalette.gold
+        case .diagnostics: return GuardPalette.blue
         }
     }
 
-    private var shieldArtwork: some View {
-        let tint = ["disabled", "uninstalled"].contains(model.phase) ? Color(red: 0.57, green: 0.65, blue: 0.66) : accent
-        let symbol = model.phase == "protecting" ? "checkmark.shield.fill" : model.phase == "locked" ? "lock.shield.fill" : "shield.lefthalf.filled"
-        return ZStack {
-            Circle().fill(RadialGradient(colors: [tint.opacity(0.18), tint.opacity(0.035), .clear], center: .center, startRadius: 25, endRadius: 116))
-                .frame(width: 232, height: 232)
-            Circle().stroke(tint.opacity(0.06), lineWidth: 1).frame(width: 206, height: 206)
-            Circle().stroke(tint.opacity(0.13), lineWidth: 1).frame(width: 165, height: 165)
-            RoundedRectangle(cornerRadius: 33)
-                .fill(LinearGradient(colors: [tint.opacity(0.18), tint.opacity(0.045)], startPoint: .topLeading, endPoint: .bottomTrailing))
-                .overlay(RoundedRectangle(cornerRadius: 33).strokeBorder(.white.opacity(0.13), lineWidth: 1))
-                .frame(width: 124, height: 132).rotationEffect(.degrees(-9))
-                .shadow(color: tint.opacity(0.10), radius: 24, y: 8)
-            Image(systemName: symbol).font(.system(size: 71, weight: .regular))
-                .foregroundStyle(LinearGradient(colors: [tint.opacity(0.98), tint.opacity(0.58)], startPoint: .topLeading, endPoint: .bottomTrailing))
-                .shadow(color: tint.opacity(0.18), radius: 14, y: 4)
-            Image(systemName: model.phase == "protecting" ? "checkmark" : model.phase == "locked" ? "lock.fill" : "power")
-                .font(.system(size: 13, weight: .bold)).foregroundStyle(tint)
-                .frame(width: 33, height: 33).background(Color(red: 0.15, green: 0.21, blue: 0.21), in: Circle())
-                .overlay(Circle().strokeBorder(tint.opacity(0.30), lineWidth: 1))
-                .offset(x: 60, y: 57)
-        }.accessibilityHidden(true)
+    private var overview: some View {
+        VStack(spacing: 0) {
+            PlanetView(indicator: indicator, animated: !reduceMotion && indicator != .inactive)
+                .frame(width: 420, height: 228)
+                .id(indicator)
+                .transition(.opacity)
+            HStack(spacing: 7) {
+                Circle().fill(model.color).frame(width: 6, height: 6)
+                Text("网络保护").font(.system(size: 11, weight: .semibold)).tracking(1.5)
+                    .foregroundStyle(GuardPalette.secondary)
+                if model.busy { ProgressView().controlSize(.mini).tint(accent) }
+            }.padding(.bottom, 10)
+            Text(model.title).font(.system(size: 34, weight: .semibold)).tracking(-0.6)
+                .lineLimit(1).minimumScaleFactor(0.75)
+                .id(model.title).transition(.opacity)
+            Text(summary).font(.system(size: 13)).foregroundStyle(GuardPalette.secondary)
+                .multilineTextAlignment(.center).lineSpacing(4)
+                .frame(maxWidth: 440).padding(.top, 10).fixedSize(horizontal: false, vertical: true)
+            Button { model.perform(model.primaryAction) } label: {
+                HStack(spacing: 9) {
+                    Image(systemName: model.primaryAction == "enable" ? "power" : "network")
+                    Text(model.primaryTitle)
+                }.frame(minWidth: 168)
+            }.buttonStyle(PillButton(prominent: model.primaryAction == "enable"))
+                .disabled(model.busy)
+                .padding(.top, 22)
+                .accessibilityIdentifier(model.primaryAction == "enable" ? "enableGuard" : "disableGuard")
+            Spacer(minLength: 16)
+            HStack(spacing: 10) {
+                modeChip("增强模式", tint: GuardPalette.mint)
+                modeChip("系统代理", tint: GuardPalette.blue)
+                Button { go(.settings) } label: {
+                    HStack(spacing: 8) {
+                        Circle().fill(model.boot ? GuardPalette.gold : Color.white.opacity(0.25)).frame(width: 7, height: 7)
+                        Text("开机守护").foregroundStyle(GuardPalette.secondary)
+                        Text(model.boot ? "已开启" : "未开启").fontWeight(.semibold)
+                        Image(systemName: "chevron.right").font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(GuardPalette.subtle).offset(x: hoveringBoot ? 2 : 0)
+                    }.font(.system(size: 12)).padding(.horizontal, 14).frame(height: 34)
+                        .background(Color.white.opacity(hoveringBoot ? 0.09 : 0.05), in: Capsule())
+                        .overlay(Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 1))
+                        .contentShape(Capsule())
+                        .animation(.easeOut(duration: 0.15), value: hoveringBoot)
+                }.buttonStyle(.plain).onHover { hoveringBoot = $0 }
+                    .help(model.boot ? "系统启动时自动布防" : "由你手动开启保护")
+                    .accessibilityIdentifier("openBootSettings")
+            }
+            HStack(spacing: 6) {
+                Image(systemName: "lock.shield").foregroundStyle(GuardPalette.subtle)
+                Text("异常后保持网络锁定，需手动关闭守护并恢复。").foregroundStyle(GuardPalette.subtle)
+            }.font(.system(size: 11)).padding(.top, 14)
+        }
+        .frame(maxWidth: .infinity)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.35), value: model.phase)
     }
 
-    private func modeCard(_ title: String, icon: String, tint: Color) -> some View {
+    private func modeChip(_ title: String, tint: Color) -> some View {
         let confirmed = model.phase == "protecting"
-        return VStack(alignment: .leading, spacing: 15) {
-            Label(title, systemImage: icon).font(.system(size: 12, weight: .medium)).foregroundStyle(tint)
-            HStack(spacing: 8) {
-                Text(confirmed ? "已开启" : "待确认").font(.system(size: 22, weight: .semibold))
-                if confirmed { Image(systemName: "checkmark.circle.fill").font(.system(size: 13)).foregroundStyle(tint) }
-            }
-            Text(confirmed ? "Surge 已确认" : (["disabled", "uninstalled"].contains(model.phase) ? "开启守护后持续检查" : "当前状态无法确认"))
-                .font(.system(size: 11)).foregroundStyle(GuardPalette.secondary)
-        }.frame(maxWidth: .infinity, alignment: .leading).padding(19).modifier(GlassPanel(radius: 17))
+        let hint = confirmed ? "Surge 已确认" : (["disabled", "uninstalled"].contains(model.phase) ? "开启守护后持续检查" : "当前状态无法确认")
+        return HStack(spacing: 8) {
+            Circle().fill(confirmed ? tint : Color.white.opacity(0.25)).frame(width: 7, height: 7)
+                .shadow(color: confirmed ? tint.opacity(0.8) : Color.clear, radius: 4)
+            Text(title).foregroundStyle(GuardPalette.secondary)
+            Text(confirmed ? "已开启" : "待确认").fontWeight(.semibold)
+        }.font(.system(size: 12)).padding(.horizontal, 14).frame(height: 34)
+            .background(Color.white.opacity(0.05), in: Capsule())
+            .overlay(Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 1))
+            .help(hint)
+            .accessibilityElement(children: .combine)
+            .accessibilityHint(hint)
     }
 
     private var settings: some View {
-        ScrollView {
-        VStack(alignment: .leading, spacing: 16) {
+        ScrollView(showsIndicators: false) {
+        VStack(alignment: .leading, spacing: 14) {
             pageHeading("守护设置", subtitle: "按你的习惯，安排每一次连接。")
             timeoutEditor
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 16) {
                 HStack(spacing: 14) {
                     settingIcon("sunrise", tint: GuardPalette.gold)
                     VStack(alignment: .leading, spacing: 5) {
@@ -479,13 +656,13 @@ struct GuardView: View {
                         .labelsHidden().toggleStyle(.switch).tint(GuardPalette.mint)
                         .disabled(model.busy).accessibilityIdentifier("startAtBoot")
                 }
-                Rectangle().fill(.white.opacity(0.07)).frame(height: 1)
+                Rectangle().fill(Color.white.opacity(0.07)).frame(height: 1)
                 HStack(alignment: .top, spacing: 9) {
                     Image(systemName: "info.circle").foregroundStyle(GuardPalette.gold).padding(.top, 1)
                     Text("开机时 Surge 未就绪也会锁网。关闭守护后若保留此选项，下次开机会重新布防。")
                         .foregroundStyle(GuardPalette.secondary).lineSpacing(4)
                 }.font(.system(size: 12))
-            }.padding(22).modifier(GlassPanel(radius: 18))
+            }.padding(20).modifier(GlassPanel(radius: 18))
             HStack(alignment: .top, spacing: 14) {
                 settingIcon("key.horizontal", tint: GuardPalette.mint)
                 VStack(alignment: .leading, spacing: 7) {
@@ -494,8 +671,7 @@ struct GuardView: View {
                         .font(.system(size: 12)).foregroundStyle(GuardPalette.secondary).lineSpacing(4)
                 }
                 Spacer()
-            }.padding(22).modifier(GlassPanel(radius: 18))
-            Spacer(minLength: 0)
+            }.padding(20).modifier(GlassPanel(radius: 18))
             HStack {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("卸载后台组件").font(.system(size: 12, weight: .medium))
@@ -503,15 +679,16 @@ struct GuardView: View {
                 }
                 Spacer()
                 Button("卸载…", role: .destructive) { model.perform("uninstall") }
-                    .buttonStyle(SoftButton()).disabled(model.busy || !model.installed)
-                    .opacity(!model.installed ? 0.4 : 1).accessibilityIdentifier("uninstallGuard")
-            }.padding(.top, 6)
+                    .buttonStyle(PillButton()).disabled(model.busy || !model.installed)
+                    .accessibilityIdentifier("uninstallGuard")
+            }.padding(.horizontal, 4).padding(.top, 4)
+        }.frame(maxWidth: 640).frame(maxWidth: .infinity)
         }
-            }
     }
 
     private var timeoutEditor: some View {
-        VStack(alignment: .leading, spacing: 15) {
+        let unchanged = model.parsedTimeout == nil || model.parsedTimeout == model.timeoutMS
+        return VStack(alignment: .leading, spacing: 15) {
             HStack(spacing: 14) {
                 settingIcon("waveform.path", tint: GuardPalette.blue)
                 VStack(alignment: .leading, spacing: 5) {
@@ -527,16 +704,15 @@ struct GuardView: View {
                         .onSubmit { model.saveTimeout() }
                         .accessibilityIdentifier("timeoutInput")
                     Text("ms").font(.system(size: 11)).foregroundStyle(GuardPalette.secondary)
-                }.padding(.horizontal, 12).frame(width: 108, height: 40)
-                    .background(.black.opacity(0.15), in: RoundedRectangle(cornerRadius: 11))
-                    .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(.white.opacity(0.10), lineWidth: 1))
+                }.padding(.horizontal, 14).frame(width: 112, height: 40)
+                    .background(Color.black.opacity(0.22), in: Capsule())
+                    .overlay(Capsule().strokeBorder(model.timeoutInputError == nil ? Color.white.opacity(0.10) : Color.orange.opacity(0.6), lineWidth: 1))
                     .disabled(model.busy)
-                Button("保存") { model.saveTimeout() }.buttonStyle(SoftButton(prominent: true))
-                    .disabled(model.busy || model.parsedTimeout == nil || model.parsedTimeout == model.timeoutMS)
-                    .opacity(model.busy || model.parsedTimeout == nil || model.parsedTimeout == model.timeoutMS ? 0.45 : 1)
+                Button("保存") { model.saveTimeout() }.buttonStyle(PillButton(prominent: true))
+                    .disabled(model.busy || unchanged)
                     .accessibilityIdentifier("saveTimeout")
             }
-            Rectangle().fill(.white.opacity(0.07)).frame(height: 1)
+            Rectangle().fill(Color.white.opacity(0.07)).frame(height: 1)
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 6) {
                     if let error = model.timeoutInputError {
@@ -548,43 +724,49 @@ struct GuardView: View {
                         .foregroundStyle(GuardPalette.secondary).fixedSize(horizontal: false, vertical: true)
                 }.font(.system(size: 11)).lineSpacing(3)
                 Spacer(minLength: 12)
-                Button("恢复默认") { model.resetTimeout() }.buttonStyle(.plain)
-                    .font(.system(size: 11)).foregroundStyle(GuardPalette.mint).disabled(model.busy)
+                Button("恢复默认") { model.resetTimeout() }.buttonStyle(HoverLink())
+                    .font(.system(size: 11)).disabled(model.busy)
                     .accessibilityIdentifier("resetTimeout")
             }
             if model.engineOutdated {
                 Text("旧版后台尚待升级，请先用旧版关闭并恢复网络。")
                     .font(.system(size: 11)).foregroundStyle(GuardPalette.gold)
             }
-        }.padding(22).modifier(GlassPanel(radius: 18))
+        }.padding(20).modifier(GlassPanel(radius: 18))
     }
 
     private var diagnostics: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .top) {
                 pageHeading("运行诊断", subtitle: "查看后台状态，找到每一次锁网的原因。")
                 Spacer()
                 Button { model.perform("diagnostics") } label: { Label("读取诊断", systemImage: "arrow.clockwise") }
-                    .buttonStyle(SoftButton()).disabled(model.busy).accessibilityIdentifier("readDiagnostics")
+                    .buttonStyle(PillButton()).disabled(model.busy).accessibilityIdentifier("readDiagnostics")
             }
-            HStack(spacing: 10) {
-                Circle().fill(model.color).frame(width: 7, height: 7)
-                Text(model.title).font(.system(size: 13, weight: .semibold))
+            HStack(spacing: 14) {
+                PlanetView(indicator: indicator, animated: false).frame(width: 44, height: 44)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(model.title).font(.system(size: 14, weight: .semibold))
+                    Text(model.detail).font(.system(size: 11)).foregroundStyle(GuardPalette.secondary).lineLimit(1)
+                }
                 Spacer()
-                Text("状态约每秒刷新").font(.system(size: 11)).foregroundStyle(GuardPalette.secondary)
-            }.padding(18).modifier(GlassPanel(radius: 14))
+                Text("约每秒刷新").font(.system(size: 11)).foregroundStyle(GuardPalette.subtle)
+            }.padding(.horizontal, 16).padding(.vertical, 12).modifier(GlassPanel(radius: 16))
             VStack(alignment: .leading, spacing: 0) {
-                HStack {
-                    Label("最近操作输出", systemImage: "terminal").font(.system(size: 11, weight: .medium))
+                HStack(spacing: 6) {
+                    Circle().fill(Color(red: 1, green: 0.37, blue: 0.34).opacity(0.8)).frame(width: 8, height: 8)
+                    Circle().fill(Color(red: 1, green: 0.74, blue: 0.18).opacity(0.8)).frame(width: 8, height: 8)
+                    Circle().fill(Color(red: 0.16, green: 0.79, blue: 0.25).opacity(0.8)).frame(width: 8, height: 8)
+                    Label("最近操作输出", systemImage: "terminal").font(.system(size: 11, weight: .medium)).padding(.leading, 8)
                     Spacer()
                     if !model.output.isEmpty {
-                        Button("展开") { model.showDetails = true }.buttonStyle(.plain).foregroundStyle(GuardPalette.mint).font(.system(size: 11))
+                        Button("展开") { model.showDetails = true }.buttonStyle(HoverLink()).font(.system(size: 11))
                     }
-                }.foregroundStyle(GuardPalette.secondary).padding(17)
-                Rectangle().fill(.white.opacity(0.06)).frame(height: 1)
+                }.foregroundStyle(GuardPalette.secondary).padding(.horizontal, 16).padding(.vertical, 13)
+                Rectangle().fill(Color.white.opacity(0.06)).frame(height: 1)
                 if model.output.isEmpty {
                     VStack(spacing: 12) {
-                        Image(systemName: "doc.text.magnifyingglass").font(.system(size: 31, weight: .light)).foregroundStyle(GuardPalette.subtle)
+                        Image(systemName: "doc.text.magnifyingglass").font(.system(size: 30, weight: .light)).foregroundStyle(GuardPalette.subtle)
                         Text("还没有诊断记录").font(.system(size: 14, weight: .medium))
                         Text("点击“读取诊断”，获取当前状态和最近日志。")
                             .font(.system(size: 12)).foregroundStyle(GuardPalette.secondary)
@@ -592,24 +774,29 @@ struct GuardView: View {
                 } else {
                     ScrollView {
                         Text(model.output).font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
-                            .foregroundStyle(.white.opacity(0.76)).frame(maxWidth: .infinity, alignment: .leading).padding(17)
+                            .foregroundStyle(Color.white.opacity(0.76)).frame(maxWidth: .infinity, alignment: .leading).padding(16)
                     }
                 }
-            }.frame(maxHeight: .infinity).modifier(GlassPanel(radius: 18))
+            }.frame(maxHeight: .infinity)
+                .background(Color.black.opacity(0.22), in: RoundedRectangle(cornerRadius: 18))
+                .modifier(GlassPanel(radius: 18))
             Label("读取状态不会主动触发断网。", systemImage: "info.circle")
                 .font(.system(size: 11)).foregroundStyle(GuardPalette.secondary).padding(.horizontal, 3)
-        }
+        }.frame(maxWidth: 720).frame(maxWidth: .infinity)
     }
 
     private func pageHeading(_ title: String, subtitle: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(title).font(.system(size: 21, weight: .semibold))
+            Text(title).font(.system(size: 22, weight: .semibold)).tracking(-0.3)
             Text(subtitle).font(.system(size: 12)).foregroundStyle(GuardPalette.secondary)
-        }.padding(.bottom, 3)
+        }.padding(.bottom, 2)
     }
     private func settingIcon(_ name: String, tint: Color) -> some View {
-        Image(systemName: name).font(.system(size: 18, weight: .regular)).foregroundStyle(tint)
-            .frame(width: 42, height: 42).background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+        Image(systemName: name).font(.system(size: 17, weight: .regular)).foregroundStyle(tint)
+            .frame(width: 42, height: 42)
+            .background(Circle().fill(RadialGradient(colors: [tint.opacity(0.22), tint.opacity(0.05)],
+                                                     center: UnitPoint(x: 0.3, y: 0.3), startRadius: 0, endRadius: 30)))
+            .overlay(Circle().strokeBorder(Color.white.opacity(0.08), lineWidth: 1))
     }
     private var footer: some View {
         HStack(spacing: 8) {
@@ -618,13 +805,14 @@ struct GuardView: View {
             Text(model.activity.isEmpty ? "关闭窗口后，可从菜单栏打开。" : model.activity)
                 .font(.system(size: 11)).foregroundStyle(GuardPalette.secondary).lineLimit(1)
             if !model.output.isEmpty {
-                Button("查看详情") { model.showDetails = true }.font(.system(size: 11)).buttonStyle(.plain).foregroundStyle(GuardPalette.mint)
+                Button("查看详情") { model.showDetails = true }.font(.system(size: 11)).buttonStyle(HoverLink())
             }
             Spacer(minLength: 12)
+            Text("⌘1 守护 · ⌘2 设置 · ⌘3 诊断").font(.system(size: 10)).foregroundStyle(GuardPalette.subtle)
             Text(model.preview ? "安全预览" : "Surge 断网守护 · 2.3.0")
-                .font(.system(size: 10, weight: .medium)).foregroundStyle(GuardPalette.subtle)
-        }.padding(.horizontal, 28).frame(height: 43)
-            .overlay(alignment: .top) { Rectangle().fill(.white.opacity(0.065)).frame(height: 1) }
+                .font(.system(size: 10, weight: .medium)).foregroundStyle(GuardPalette.subtle).padding(.leading, 8)
+        }.padding(.horizontal, 28).frame(height: 40)
+            .overlay(alignment: .top) { Rectangle().fill(Color.white.opacity(0.06)).frame(height: 1) }
     }
     private var details: some View {
         VStack(alignment: .leading, spacing: 17) {
@@ -632,16 +820,17 @@ struct GuardView: View {
                 Label("操作详情", systemImage: "terminal").font(.system(size: 18, weight: .semibold))
                 Spacer()
                 Button("完成") { model.showDetails = false }.keyboardShortcut(.defaultAction)
-                    .buttonStyle(SoftButton())
+                    .buttonStyle(PillButton(prominent: true))
             }
             ScrollView {
                 Text(model.output.isEmpty ? model.activity : model.output)
                     .font(.system(size: 12, design: .monospaced)).textSelection(.enabled)
-                    .foregroundStyle(.white.opacity(0.80)).frame(maxWidth: .infinity, alignment: .leading).padding(17)
+                    .foregroundStyle(Color.white.opacity(0.80)).frame(maxWidth: .infinity, alignment: .leading).padding(17)
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 14))
+                .background(Color.black.opacity(0.25), in: RoundedRectangle(cornerRadius: 14))
+                .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.white.opacity(0.07), lineWidth: 1))
         }.padding(24).frame(width: 710, height: 450)
-            .background(Color(red: 0.10, green: 0.13, blue: 0.15)).preferredColorScheme(.dark)
+            .background(GuardPalette.spaceLift).preferredColorScheme(.dark)
     }
 }
 
