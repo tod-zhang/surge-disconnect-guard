@@ -3,6 +3,7 @@ import AppKit
 import Foundation
 import Darwin
 import Combine
+import UserNotifications
 
 let statusURL = URL(fileURLWithPath: "/var/run/local.surgedisconnect.guard.status.json")
 let installPath = "/Library/Application Support/SurgeDisconnectGuard"
@@ -46,6 +47,9 @@ final class GuardModel: ObservableObject {
     @Published var engineOutdated = false
     let preview: Bool
     private var timer: Timer?
+    private var alertTracker = GuardAlertTracker()
+    /// Set by the app delegate; phases are only tracked once someone can be alerted.
+    var onAlert: ((GuardAlert) -> Void)?
     init() {
         preview = CommandLine.arguments.contains("--preview")
         boot = UserDefaults.standard.object(forKey: "bootPreference") as? Bool ?? true
@@ -110,6 +114,7 @@ final class GuardModel: ObservableObject {
             phase = "uninstalled"
             detail = "首次安装权限组件需管理员授权；此版本后续日常开关无需重复输入密码。"
         }
+        if let onAlert = onAlert, let alert = alertTracker.observe(phase: phase, detail: detail) { onAlert(alert) }
     }
     var parsedTimeout: Int? { try? GuardSettings.parse(timeoutText) }
     var timeoutInputError: String? {
@@ -739,6 +744,7 @@ private struct PlanetView: View {
 struct GuardView: View {
     @StateObject private var model: GuardModel
     @ObservedObject private var updater: UpdateModel
+    @ObservedObject private var alerts: AlertSettings
     @State private var page: GuardPage = .overview
     @State private var hoveredTab: GuardPage?
     @State private var hoveringBoot = false
@@ -746,9 +752,10 @@ struct GuardView: View {
     @State private var confirmUpdate = false
     @Namespace private var tabSelection
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    init(model: GuardModel, updater: UpdateModel) {
+    init(model: GuardModel, updater: UpdateModel, alerts: AlertSettings) {
         _model = StateObject(wrappedValue: model)
         self.updater = updater
+        self.alerts = alerts
     }
 
     private var indicator: GuardIndicator { GuardIndicator(phase: model.phase) }
@@ -958,6 +965,7 @@ struct GuardView: View {
                         .foregroundColor(Zine.secondary).lineSpacing(4)
                 }.font(.system(size: 12))
             }.padding(20).modifier(ComicPanel(spine: Zine.amber))
+            alertsPanel
             HStack(alignment: .top, spacing: 14) {
                 settingIcon("key.horizontal", tint: Zine.acid)
                 VStack(alignment: .leading, spacing: 7) {
@@ -1102,6 +1110,47 @@ struct GuardView: View {
             else if success { model.activity = "守护尚未完全关闭，暂不安装更新。" }
         }
     }
+    private var alertsPanel: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 14) {
+                settingIcon("bell.badge", tint: Zine.hot)
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("断网提醒").font(.system(size: 14, weight: .black))
+                    Text("锁网时发系统通知并写明原因，点击通知可打开应用恢复网络。").font(.system(size: 12)).foregroundColor(Zine.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer()
+                Toggle("断网时发送通知", isOn: $alerts.notify)
+                    .labelsHidden().toggleStyle(.switch).tint(Zine.acid).accessibilityIdentifier("alertNotify")
+            }
+            Rectangle().fill(Zine.edge).frame(height: 1)
+            HStack(spacing: 18) {
+                Toggle("提示音", isOn: $alerts.sound).accessibilityIdentifier("alertSound")
+                Toggle("恢复网络时也通知", isOn: $alerts.notifyRestore).accessibilityIdentifier("alertRestore")
+                Spacer()
+            }.toggleStyle(.switch).tint(Zine.acid).controlSize(.small)
+                .font(.system(size: 12, weight: .bold)).disabled(!alerts.notify)
+            if alerts.notificationsDenied && alerts.notify {
+                Text("通知权限未开启，请在“系统设置 → 通知”中允许本应用。")
+                    .font(.system(size: 11)).foregroundColor(Zine.hot)
+            }
+            Rectangle().fill(Zine.edge).frame(height: 1)
+            HStack(alignment: .center, spacing: 10) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("登录时打开（仅菜单栏）").font(.system(size: 12, weight: .bold))
+                    Text(alerts.loginMessage).font(.system(size: 11)).foregroundColor(Zine.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer()
+                if alerts.needsLoginApproval {
+                    Button("打开登录项 ›") { alerts.openLoginItemsSettings() }.buttonStyle(HoverLink())
+                }
+                Toggle("登录时打开", isOn: Binding(get: { alerts.openAtLogin }, set: { alerts.setOpenAtLogin($0) }))
+                    .labelsHidden().toggleStyle(.switch).tint(Zine.acid).accessibilityIdentifier("openAtLogin")
+            }
+        }.padding(20).modifier(ComicPanel(spine: Zine.hot))
+    }
+
     private var updatePanel: some View {
         let ready = updater.phase == .ready
         let tint: Color = updater.phase == .failed ? Zine.hot : (updater.hasUpdate ? Zine.acid : Zine.cyan)
@@ -1293,9 +1342,10 @@ enum GuardIndicator: CaseIterable {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNotificationCenterDelegate {
     let model = GuardModel()
     lazy var updater = UpdateModel(preview: model.preview)
+    lazy var alerts = AlertSettings(preview: model.preview)
     private var window: NSWindow?
     private var statusItem: NSStatusItem?
     private let stateItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
@@ -1303,7 +1353,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var subscriptions = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let view = NSHostingView(rootView: GuardView(model: model, updater: updater))
+        let view = NSHostingView(rootView: GuardView(model: model, updater: updater, alerts: alerts))
         let size = view.fittingSize
         let window = NSWindow(contentRect: NSRect(origin: .zero, size: size),
                               styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)
@@ -1325,7 +1375,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }.store(in: &subscriptions)
         if let notice = updater.consumeUpdateNotice() { model.activity = notice }
         updater.startAutomaticChecks()
-        showWindow()
+        if !model.preview && Bundle.main.bundleIdentifier != nil {
+            UNUserNotificationCenter.current().delegate = self
+            if alerts.notify { alerts.requestAuthorization() }
+            model.onAlert = { [weak self] alert in self?.alerts.post(alert) }
+            // Announce a lock that happened before the app opened, e.g. at boot.
+            model.refresh()
+        }
+        // As a login item, stay in the menu bar only; clicking the icon opens the window.
+        if launchedAsLoginItem() { NSApp.setActivationPolicy(.accessory) } else { showWindow() }
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .list, .sound])
+    }
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+                                withCompletionHandler completionHandler: @escaping () -> Void) {
+        DispatchQueue.main.async { [weak self] in self?.showWindow() }
+        completionHandler()
     }
 
     private func configureMenuBar() {
@@ -1390,6 +1458,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc func showWindow() {
+        alerts.refreshLoginItem()
         NSApp.setActivationPolicy(.regular)
         window?.deminiaturize(nil)
         window?.makeKeyAndOrderFront(nil)
@@ -1442,14 +1511,14 @@ func uiSelfTest() -> Bool {
         guard image.size == NSSize(width: 20, height: 20),
               image.isTemplate == (indicator == .inactive), image.tiffRepresentation != nil else { return false }
     }
-    return updaterSelfTest()
+    return updaterSelfTest() && alertSelfTest()
 }
 
 @main enum SurgeGuardApp {
     static func main() {
         if CommandLine.arguments.contains("--self-test") {
             let success = uiSelfTest()
-            print(success ? "PASS GUI 状态解析、菜单栏图标状态、管理员命令引用及更新校验检查。未修改系统。" : "FAIL GUI 自检")
+            print(success ? "PASS GUI 状态解析、菜单栏图标状态、管理员命令引用、更新校验及断网提醒检查。未修改系统。" : "FAIL GUI 自检")
             exit(success ? 0 : 1)
         }
         let application = NSApplication.shared

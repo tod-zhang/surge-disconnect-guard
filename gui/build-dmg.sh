@@ -5,15 +5,15 @@ BASE=$(cd -- "$GUI/.." && pwd -P)
 WORK=${1:?请传入中间构建目录的绝对路径}
 OUTPUT=${2:?请传入输出 DMG 的绝对路径}
 # App version; the detection engine and privileged helper keep their own version (2.4.0).
-VERSION=2.5.0
-BUILD_NUMBER=250
+VERSION=2.6.0
+BUILD_NUMBER=260
 APP="$WORK/Surge 断网守护.app"
 STAGE="$WORK/dmg-root"
 mkdir -p "$WORK" "$APP/Contents/MacOS" "$APP/Contents/Resources/engine" "$STAGE"
 xcrun clang -target arm64-apple-macosx13.0 -Wall -Wextra -Werror -c "$BASE/native.c" -o "$WORK/native.o"
 xcrun swiftc -parse-as-library -target arm64-apple-macosx13.0 -O -warnings-as-errors "$BASE/GuardSettings.swift" "$BASE/SurgeGuard.swift" "$WORK/native.o" -o "$WORK/surge-guard"
 "$WORK/surge-guard" self-test
-xcrun swiftc -parse-as-library -target arm64-apple-macosx13.0 -O -warnings-as-errors "$BASE/GuardSettings.swift" "$GUI/ControlIPC.swift" "$GUI/GuardUI.swift" "$GUI/Updater.swift" -o "$APP/Contents/MacOS/SurgeGuardUI"
+xcrun swiftc -parse-as-library -target arm64-apple-macosx13.0 -O -warnings-as-errors "$BASE/GuardSettings.swift" "$GUI/ControlIPC.swift" "$GUI/GuardUI.swift" "$GUI/Updater.swift" "$GUI/Alerts.swift" -o "$APP/Contents/MacOS/SurgeGuardUI"
 "$APP/Contents/MacOS/SurgeGuardUI" --self-test
 install -m 755 "$WORK/surge-guard" "$APP/Contents/Resources/engine/surge-guard"
 install -m 755 "$WORK/surge-guard" "$BASE/surge-guard"
