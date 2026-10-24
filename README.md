@@ -4,7 +4,7 @@
 
 [⬇︎ 下载最新版 DMG](https://github.com/tod-zhang/surge-disconnect-guard/releases/latest) · [使用与恢复](docs/usage.md) · [验证范围](docs/validation.md)
 
-![界面示例，运行于安全预览模式](docs/preview.png)
+<p align="center"><img src="docs/screenshots/guard-armed.png" width="720" alt="守护页：正在守护"></p>
 
 > 适用于 **Apple Silicon + macOS 13 及以上**，只支持 **Surge**（需安装在 `/Applications/Surge.app`）。
 
@@ -33,6 +33,19 @@
 
 ## 界面与功能
 
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/guard-off.png" alt="守护页：守护已关闭"><br><sub>守护已关闭</sub></td>
+    <td width="50%"><img src="docs/screenshots/settings.png" alt="设置页：无响应超时与开机守护"><br><sub>设置：无响应超时、开机守护</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/settings-alerts.png" alt="设置页：断网提醒与软件更新"><br><sub>设置：断网提醒、一次授权、软件更新</sub></td>
+    <td width="50%"><img src="docs/screenshots/diagnostics.png" alt="诊断页"><br><sub>诊断</sub></td>
+  </tr>
+</table>
+
+<sub>截图来自 2.6.1 安全预览模式（`--preview`），不安装组件、不改动网络。</sub>
+
 - **街头漫画风界面**：参考《绝区零》的街头漫画风格，分为守护、设置、诊断三页（⌘1～⌘3 切换）。守护状态由一个原创的复古电视头吉祥物表现，它会眨眼、晃天线、轻轻浮动：
   - 守护中：荧光黄绿，屏幕露出笑脸；
   - 已锁网：亮粉色，屏幕滚动警示条纹；
@@ -60,6 +73,8 @@
 关闭窗口只是收到菜单栏；选“退出界面”才会移除菜单栏图标，已开启的后台守护仍在运行。
 
 ## 升级
+
+<p align="center"><img src="docs/screenshots/settings-updates.png" width="560" alt="设置页：软件更新"></p>
 
 - **2.5.0 及以上**：直接用应用内更新即可，它会自动先恢复网络再替换应用。
 - **从更早的版本升级，或手动替换应用**：
