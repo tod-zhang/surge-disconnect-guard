@@ -146,4 +146,28 @@ esac
         self.command('control-actions.sh', ['enable', 'on'], success=False)
         self.assertFalse((self.base / 'loaded').exists())
 
+    def test_idle_publishes_disabled_after_reboot(self):
+        self.prepare(); self.call('enable'); self.call('disable', 'off')
+        (self.base / 'status.json').unlink()
+        self.command('control-actions.sh', ['idle', 'off'])
+        self.assertEqual((self.base / 'status.json').read_text(), 'disabled')
+
+    def test_idle_reports_leftover_backup(self):
+        self.prepare(); self.call('enable'); self.call('disable', 'off')
+        (self.base / 'status.json').unlink(); (self.root / 'locked.json').touch()
+        self.command('control-actions.sh', ['idle', 'off'])
+        self.assertEqual((self.base / 'status.json').read_text(), 'error')
+
+    def test_idle_leaves_running_guard_alone(self):
+        self.prepare(); self.call('enable')
+        self.command('control-actions.sh', ['idle', 'off'])
+        self.assertFalse((self.base / 'status.json').exists())
+        self.assertTrue((self.base / 'loaded').exists())
+
+    def test_helper_uninstall_leaves_helper_for_self_removal(self):
+        self.prepare(); self.command('install-control.sh', ['12345']); self.call('enable')
+        self.command('control-actions.sh', ['uninstall', 'off'])
+        self.assertFalse((self.root / 'surge-guard').exists())
+        self.assertTrue((self.root / 'sg-control').exists())
+
 if __name__ == '__main__': unittest.main(verbosity=2)

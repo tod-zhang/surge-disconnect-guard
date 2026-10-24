@@ -20,8 +20,10 @@ class ControllerTests(unittest.TestCase):
         old_root = "ROOT='/Library/Application Support/SurgeDisconnectGuard'"
         old_path = "export PATH=/usr/bin:/bin:/usr/sbin:/sbin"
         old_plist = 'PLIST="/Library/LaunchDaemons/$LABEL.plist"'
-        assert old_root in source and old_path in source and old_plist in source
+        old_run = "RUN_DIR='/var/run'"
+        assert old_root in source and old_path in source and old_plist in source and old_run in source
         source = source.replace(old_root, "ROOT='" + str(self.root) + "'")
+        source = source.replace(old_run, "RUN_DIR='" + str(self.base) + "'")
         source = source.replace(old_path, "export PATH='" + str(self.mock) + ":/usr/bin:/bin:/usr/sbin:/sbin'")
         source = source.replace(old_plist, 'PLIST="' + str(self.base) + '/$LABEL.plist"')
         self.script = self.base / "controller"
@@ -146,6 +148,36 @@ esac
         self.assertTrue((self.base / "loaded").exists())
         self.assertLess(trace.index("guard lock"),
                         next(i for i, line in enumerate(trace) if line.startswith("launchctl bootstrap")))
+
+    def test_lock_uses_private_plist_when_boot_plist_absent(self):
+        (self.base / "loaded").touch()
+        (self.root / "daemon.plist").write_text("plist")
+        result, trace = self.run_control("lock")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("launchctl bootstrap system " + str(self.root / "daemon.plist"), trace)
+
+    def control_files(self):
+        return [self.root / "sg-control", self.root / "control-actions.sh", self.root / "control-client.json",
+                self.base / "local.surgedisconnect.control.plist", self.base / "local.surgedisconnect.guard.status.json"]
+
+    def test_direct_uninstall_removes_permission_helper(self):
+        for path in self.control_files():
+            path.write_text("x")
+        result, trace = self.run_control("uninstall")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for path in self.control_files():
+            self.assertFalse(path.exists(), path)
+        self.assertFalse(self.root.exists())
+
+    def test_helper_uninstall_keeps_helper_for_self_removal(self):
+        for path in self.control_files():
+            path.write_text("x")
+        env = dict(os.environ, TEST_BASE=str(self.base))
+        result = subprocess.run(["/bin/bash", str(self.script), "uninstall", "--keep-control"],
+                                env=env, capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.root / "sg-control").exists())
+        self.assertFalse((self.root / "surge-guard").exists())
 
 
 if __name__ == "__main__":
