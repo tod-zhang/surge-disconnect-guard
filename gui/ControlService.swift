@@ -39,11 +39,22 @@ func verifyControlClient(fd: Int32, authorization: AuthorizedClient, identifier:
     return false
 }
 func runControlAction(_ request: ControlRequest, script: String = controlScript, timeoutSeconds: Double = 120) throws -> ControlReply {
-    guard [.enable, .disable, .boot, .diagnostics, .uninstall, .setTimeout].contains(request.action) else { throw ControlFailure("操作不被允许。") }
-    if request.action == .setTimeout && request.timeoutMS == nil { throw ControlFailure("缺少超时参数。") }
-    if request.timeoutMS != nil && ![.enable, .setTimeout].contains(request.action) { throw ControlFailure("此操作不接受超时参数。") }
+    let allowed: [ControlAction] = [.enable, .disable, .boot, .diagnostics, .uninstall, .setTimeout, .setInterval, .setAutoRestore]
+    guard allowed.contains(request.action) else { throw ControlFailure("操作不被允许。") }
+    // Settings travel as positional script arguments: timeout, then interval, then auto-restore.
+    let given = (request.timeoutMS != nil, request.intervalMS != nil, request.autoRestore != nil)
+    switch request.action {
+    case .setTimeout: guard given == (true, false, false) else { throw ControlFailure("缺少超时参数或参数多余。") }
+    case .setInterval: guard given == (false, true, false) else { throw ControlFailure("缺少查询间隔参数或参数多余。") }
+    case .setAutoRestore: guard given == (false, false, true) else { throw ControlFailure("缺少自动恢复参数或参数多余。") }
+    case .enable:
+        guard (!given.1 || given.0) && (!given.2 || given.1) else { throw ControlFailure("开启守护的设置参数不完整。") }
+    default: guard given == (false, false, false) else { throw ControlFailure("此操作不接受设置参数。") }
+    }
     var arguments = [request.action.rawValue, request.boot ? "on" : "off"]
     if let ms = request.timeoutMS { arguments.append(String(try GuardSettings(timeoutMS: ms).timeoutMS)) }
+    if let ms = request.intervalMS { arguments.append(String(try GuardSettings(intervalMS: ms).intervalMS)) }
+    if let on = request.autoRestore { arguments.append(on ? "on" : "off") }
     return try runFixedScript(arguments, script: script, timeoutSeconds: timeoutSeconds)
 }
 // Internal only: never reachable from a client request.

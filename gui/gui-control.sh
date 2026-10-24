@@ -7,7 +7,8 @@ ROOT='/Library/Application Support/SurgeDisconnectGuard'
 LABEL='local.surgedisconnect.guard'
 BOOT="/Library/LaunchDaemons/$LABEL.plist"
 STATUS='/var/run/local.surgedisconnect.guard.status.json'
-VERSION='2.4.0'
+NEWSYSLOG_CONF='/etc/newsyslog.d/local.surgedisconnect.conf'
+VERSION=$(tr -d '[:space:]' < "$SOURCE/VERSION")
 ACTION=${1:-}
 PREFERENCE=${2:-on}
 
@@ -31,6 +32,9 @@ install_core() {
     check_root
     if [[ -f "$ROOT/engine-version" && $(cat "$ROOT/engine-version") == "$VERSION" ]]; then return; fi
     if loaded || [[ -f "$ROOT/locked.json" || -f "$ROOT/armed.json" ]]; then
+        # Installing the permission helper must not fail because an older engine is still
+        # guarding; that engine keeps running and is replaced after the next restore.
+        if [[ "$ACTION" == prepare ]]; then echo '旧版守护仍在运行，将在下次关闭并恢复网络后升级。'; return; fi
         echo '检测到正在运行或已锁定的旧版。请先点击“关闭并恢复网络”，再开启新版。' >&2
         exit 1
     fi
@@ -40,6 +44,7 @@ install_core() {
     install -o root -g wheel -m 755 "$SOURCE/surge-guard" "$ROOT/surge-guard"
     install -o root -g wheel -m 755 "$SOURCE/sgctl" "$ROOT/sgctl"
     install -o root -g wheel -m 644 "$SOURCE/$LABEL.plist" "$ROOT/daemon.plist"
+    install -o root -g wheel -m 644 "$SOURCE/local.surgedisconnect.newsyslog.conf" "$NEWSYSLOG_CONF"
     printf '%s\n' "$VERSION" > "$ROOT/engine-version"
     chmod 600 "$ROOT/engine-version"
 }

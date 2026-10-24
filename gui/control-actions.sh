@@ -21,6 +21,8 @@ apply_boot() {
 case "${1:-}" in
     enable)
         if [[ -n "${3:-}" ]]; then "$ROOT/surge-guard" settings-set "$3"; fi
+        if [[ -n "${4:-}" ]]; then "$ROOT/surge-guard" settings-interval "$4"; fi
+        if [[ -n "${5:-}" ]]; then "$ROOT/surge-guard" settings-auto-restore "$5"; fi
         "$ROOT/sgctl" enable
         apply_boot
         echo '已开启守护。'
@@ -40,6 +42,13 @@ case "${1:-}" in
         ;;
     setTimeout)
         "$ROOT/surge-guard" settings-set "${3:-}"
+        ;;
+    setInterval)
+        "$ROOT/surge-guard" settings-interval "${3:-}"
+        ;;
+    setAutoRestore)
+        # Read by the running guard within a second; nothing is restarted.
+        "$ROOT/surge-guard" settings-auto-restore "${3:-}"
         ;;
     diagnostics) "$ROOT/sgctl" status ;;
     idle)

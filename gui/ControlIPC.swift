@@ -2,7 +2,7 @@ import Foundation
 import Darwin
 import Security
 
-let controlVersion = "2.4.0"
+let controlVersion = buildVersion
 let controlSocket = "/var/run/local.surgedisconnect.control.sock"
 let controlRoot = "/Library/Application Support/SurgeDisconnectGuard"
 let controlLabel = "local.surgedisconnect.control"
@@ -12,15 +12,18 @@ struct ControlFailure: Error, CustomStringConvertible {
     init(_ message: String) { description = message }
 }
 enum ControlAction: String, Codable {
-    case ping, enable, disable, boot, diagnostics, uninstall, prepareUpgrade, setTimeout
+    case ping, enable, disable, boot, diagnostics, uninstall, prepareUpgrade, setTimeout, setInterval, setAutoRestore
 }
 struct ControlRequest: Codable {
     let protocolVersion: Int
     let action: ControlAction
     let boot: Bool
     let timeoutMS: Int?
-    init(_ action: ControlAction, boot: Bool = true, timeoutMS: Int? = nil) {
-        protocolVersion = 1; self.action = action; self.boot = boot; self.timeoutMS = timeoutMS
+    let intervalMS: Int?
+    let autoRestore: Bool?
+    init(_ action: ControlAction, boot: Bool = true, timeoutMS: Int? = nil, intervalMS: Int? = nil, autoRestore: Bool? = nil) {
+        protocolVersion = 1; self.action = action; self.boot = boot
+        self.timeoutMS = timeoutMS; self.intervalMS = intervalMS; self.autoRestore = autoRestore
     }
 }
 struct ControlReply: Codable {

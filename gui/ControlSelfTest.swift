@@ -54,6 +54,21 @@ func controlSelfTest() throws {
     try Data("#!/bin/bash\nprintf '%s:%s:%s' \"$1\" \"$2\" \"$3\"\n".utf8).write(to: script)
     let custom = try runControlAction(ControlRequest(.setTimeout, timeoutMS: 750), script: script.path)
     try expect(custom.success && custom.output == "setTimeout:on:750", "自定义毫秒值经白名单控制通道准确传递")
+    let interval = try runControlAction(ControlRequest(.setInterval, boot: false, intervalMS: 50), script: script.path)
+    try expect(interval.success && interval.output == "setInterval:off:50", "查询间隔经白名单控制通道准确传递")
+    let auto = try runControlAction(ControlRequest(.setAutoRestore, autoRestore: true), script: script.path)
+    try expect(auto.success && auto.output == "setAutoRestore:on:on", "自动恢复开关经白名单控制通道准确传递")
+    for ms in [4, 1001] {
+        try expect(rejected { _ = try runControlAction(ControlRequest(.setInterval, intervalMS: ms), script: script.path) }, "权限服务拒绝越界查询间隔 \(ms)")
+    }
+    for bad in [ControlRequest(.setInterval), ControlRequest(.setAutoRestore), ControlRequest(.setAutoRestore, timeoutMS: 200, autoRestore: true),
+                ControlRequest(.disable, autoRestore: true), ControlRequest(.boot, intervalMS: 20),
+                ControlRequest(.enable, autoRestore: false), ControlRequest(.enable, timeoutMS: 200, autoRestore: true)] {
+        try expect(rejected { _ = try runControlAction(bad, script: script.path) }, "权限服务拒绝缺失、多余或错位的设置参数 \(bad.action.rawValue)")
+    }
+    try Data("#!/bin/bash\nprintf '%s:%s:%s:%s:%s' \"$1\" \"$2\" \"$3\" \"$4\" \"$5\"\n".utf8).write(to: script)
+    let enable = try runControlAction(ControlRequest(.enable, boot: true, timeoutMS: 300, intervalMS: 25, autoRestore: false), script: script.path)
+    try expect(enable.success && enable.output == "enable:on:300:25:off", "开启守护时按固定顺序传递全部设置")
     try Data("#!/bin/bash\nprintf '%s:%s' \"$1\" \"$2\" > \"$0.out\"\n".utf8).write(to: script)
     publishIdleStatus(script: script.path)
     try expect((try? String(contentsOfFile: script.path + ".out", encoding: .utf8)) == "idle:off", "权限组件启动时以固定参数发布空闲状态")

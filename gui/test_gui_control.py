@@ -29,6 +29,7 @@ class GuiControlTests(unittest.TestCase):
         source = source.replace("ROOT='/Library/Application Support/SurgeDisconnectGuard'", "ROOT=" + self.quote(str(self.root)))
         source = source.replace('BOOT="/Library/LaunchDaemons/$LABEL.plist"', 'BOOT="' + str(self.launch) + '/$LABEL.plist"')
         source = source.replace("STATUS='/var/run/local.surgedisconnect.guard.status.json'", "STATUS=" + self.quote(str(self.base / "status.json")))
+        source = source.replace("NEWSYSLOG_CONF='/etc/newsyslog.d/local.surgedisconnect.conf'", "NEWSYSLOG_CONF=" + self.quote(str(self.base / "newsyslog.conf")))
         self.script = self.resources / "gui-control.sh"
         self.script.write_text(source)
         controller = (HERE.parent / "sgctl").read_text()
@@ -36,6 +37,7 @@ class GuiControlTests(unittest.TestCase):
         controller = controller.replace("ROOT='/Library/Application Support/SurgeDisconnectGuard'", "ROOT=" + self.quote(str(self.root)))
         controller = controller.replace('PLIST="/Library/LaunchDaemons/$LABEL.plist"', 'PLIST="' + str(self.launch) + '/$LABEL.plist"')
         controller = controller.replace("RUN_DIR='/var/run'", "RUN_DIR=" + self.quote(str(self.base)))
+        controller = controller.replace("NEWSYSLOG_CONF='/etc/newsyslog.d/local.surgedisconnect.conf'", "NEWSYSLOG_CONF=" + self.quote(str(self.base / "newsyslog.conf")))
         self.write(self.engine / "sgctl", controller)
         self.write(self.mock / "id", "#!/bin/bash\necho 0\n")
         self.write(self.mock / "stat", "#!/bin/bash\necho 0\n")
@@ -68,12 +70,20 @@ case "$1" in
  settings-set)
   [[ "$2" =~ ^[0-9]{2,5}$ ]] && (( 10#$2 >= 10 && 10#$2 <= 10000 )) || exit 2
   printf '%s' "$2" > "$TEST_BASE/config-ms" ;;
+ settings-interval)
+  [[ "$2" =~ ^[0-9]{1,4}$ ]] && (( 10#$2 >= 5 && 10#$2 <= 1000 )) || exit 2
+  printf '%s' "$2" > "$TEST_BASE/config-interval" ;;
+ settings-auto-restore)
+  [[ "$2" == on || "$2" == off ]] || exit 2
+  printf '%s' "$2" > "$TEST_BASE/config-auto" ;;
  ui-state-write) printf '%s' "$2" > "$TEST_BASE/status.json" ;;
  check) exit 0 ;;
  *) exit 2 ;;
 esac
 """)
         (self.engine / "local.surgedisconnect.guard.plist").write_text("mock plist")
+        (self.engine / "local.surgedisconnect.newsyslog.conf").write_text("mock newsyslog")
+        (self.engine / "VERSION").write_text("9.8.7\n")
 
     def tearDown(self):
         self.temp.cleanup()
@@ -168,14 +178,20 @@ esac
         self.call("disable")
         self.assertFalse((self.base / "loaded").exists())
         self.assertFalse((self.root / "armed.json").exists())
-        self.assertEqual((self.root / "engine-version").read_text().strip(), "2.4.0")
+        self.assertEqual((self.root / "engine-version").read_text().strip(), "9.8.7")
         self.assertEqual((self.root / "surge-guard").read_bytes(),
                          (self.engine / "surge-guard").read_bytes())
         self.assertTrue(self.boot.exists())
 
+    def test_enable_installs_log_rotation(self):
+        self.call("enable")
+        self.assertEqual((self.base / "newsyslog.conf").read_text(), "mock newsyslog")
+
     def test_uninstall_removes_autostart(self):
         self.call("enable")
+        self.assertTrue((self.base / "newsyslog.conf").exists())
         self.call("uninstall")
+        self.assertFalse((self.base / "newsyslog.conf").exists())
         self.assertFalse(self.root.exists())
         self.assertFalse(self.boot.exists())
 

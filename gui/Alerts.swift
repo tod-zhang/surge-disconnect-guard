@@ -21,8 +21,8 @@ struct GuardAlertTracker {
         case "disabled", "uninstalled", "protecting":
             guard lockAnnounced else { return nil }
             lockAnnounced = false
-            // A lock only ends through a manual restore; "protecting" right after one is a new arm.
-            return phase == "protecting" ? nil : .restored
+            // A manual restore passes through "disabled"; going straight back to "protecting" is an auto-restore.
+            return .restored
         default:
             return nil
         }
@@ -121,7 +121,8 @@ func alertSelfTest() -> Bool {
     let sequence: [(String, GuardAlert?)] = [
         ("protecting", nil), ("locked", .locked(reason: "收到 Surge 主进程退出事件")), ("unknown", nil),
         ("locked", nil), ("disabled", .restored), ("disabled", nil), ("protecting", nil),
-        ("locked", .locked(reason: "收到 Surge 主进程退出事件")), ("uninstalled", .restored)
+        ("locked", .locked(reason: "收到 Surge 主进程退出事件")), ("uninstalled", .restored),
+        ("locked", .locked(reason: "收到 Surge 主进程退出事件")), ("starting", nil), ("protecting", .restored), ("protecting", nil)
     ]
     for (phase, expected) in sequence {
         guard tracker.observe(phase: phase, detail: "收到 Surge 主进程退出事件") == expected else { return false }

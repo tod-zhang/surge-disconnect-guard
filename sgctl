@@ -9,6 +9,7 @@ BIN="$ROOT/surge-guard"
 CONTROL_LABEL='local.surgedisconnect.control'
 CONTROL_PLIST="$(dirname -- "$PLIST")/$CONTROL_LABEL.plist"
 RUN_DIR='/var/run'
+NEWSYSLOG_CONF='/etc/newsyslog.d/local.surgedisconnect.conf'
 
 if [[ $(id -u) != 0 ]]; then
     echo '请用 sudo 运行，或双击配套 .command 文件。' >&2
@@ -87,7 +88,7 @@ case "${1:-status}" in
         stop_guard
         "$BIN" restore
         # If restore fails, set -e preserves the executable and backup for recovery.
-        rm -f "$PLIST"
+        rm -f "$PLIST" "$NEWSYSLOG_CONF"
         rm -f "$ROOT/surge-guard" "$ROOT/sgctl" "$ROOT/operation.lock" "$ROOT/daemon.plist" "$ROOT/boot.enabled" "$ROOT/engine-version" "$ROOT/settings.json"
         # The permission helper passes --keep-control and removes itself after replying.
         # A direct terminal uninstall also removes the helper so nothing is left behind.

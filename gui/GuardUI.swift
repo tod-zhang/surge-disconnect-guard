@@ -44,6 +44,9 @@ final class GuardModel: ObservableObject {
     @Published var timeoutMS = GuardSettings.defaultTimeoutMS
     @Published var timeoutText = String(GuardSettings.defaultTimeoutMS)
     @Published var activeTimeoutMS: Int?
+    @Published var intervalMS = GuardSettings.defaultIntervalMS
+    @Published var intervalText = String(GuardSettings.defaultIntervalMS)
+    @Published var autoRestore = false
     @Published var engineOutdated = false
     let preview: Bool
     private var timer: Timer?
@@ -56,6 +59,10 @@ final class GuardModel: ObservableObject {
         let savedMS = UserDefaults.standard.object(forKey: "timeoutPreferenceMS") as? Int ?? GuardSettings.defaultTimeoutMS
         timeoutMS = (try? GuardSettings(timeoutMS: savedMS))?.timeoutMS ?? GuardSettings.defaultTimeoutMS
         timeoutText = String(timeoutMS)
+        let savedInterval = UserDefaults.standard.object(forKey: "intervalPreferenceMS") as? Int ?? GuardSettings.defaultIntervalMS
+        intervalMS = (try? GuardSettings(intervalMS: savedInterval))?.intervalMS ?? GuardSettings.defaultIntervalMS
+        intervalText = String(intervalMS)
+        autoRestore = UserDefaults.standard.bool(forKey: "autoRestorePreference")
         if preview { detail = "这是界面预览。所有按钮只模拟状态，不安装组件，也不修改网络。" }
         else { refresh() }
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
@@ -91,10 +98,13 @@ final class GuardModel: ObservableObject {
         installed = FileManager.default.fileExists(atPath: installPath)
         if installed, FileManager.default.fileExists(atPath: GuardSettings.publicPath), let saved = try? GuardSettings.load(from: GuardSettings.publicPath) {
             adoptTimeout(saved.timeoutMS)
+            adoptInterval(saved.intervalMS)
+            adoptAutoRestore(saved.autoRestore)
         }
         activeTimeoutMS = nil
         if let data = try? Data(contentsOf: statusURL), let status = try? JSONDecoder().decode(GuardStatus.self, from: data), installed {
-            engineOutdated = status.version != "2.4.0"
+            // A stopped old engine is replaced on the next enable; only a running one needs attention.
+            engineOutdated = status.version != buildVersion && ["protecting", "starting", "locked"].contains(status.phase)
             activeTimeoutMS = status.timeoutMS
             boot = status.boot
             UserDefaults.standard.set(boot, forKey: "bootPreference")
@@ -146,6 +156,40 @@ final class GuardModel: ObservableObject {
         timeoutText = String(GuardSettings.defaultTimeoutMS)
         saveTimeout()
     }
+    var parsedInterval: Int? { try? GuardSettings.parseInterval(intervalText) }
+    var intervalInputError: String? {
+        do { _ = try GuardSettings.parseInterval(intervalText); return nil }
+        catch { return String(describing: error) }
+    }
+    private func adoptInterval(_ value: Int) {
+        let unchanged = intervalText == String(intervalMS)
+        intervalMS = value
+        UserDefaults.standard.set(value, forKey: "intervalPreferenceMS")
+        if unchanged { intervalText = String(value) }
+    }
+    func saveInterval() {
+        guard !busy, let value = parsedInterval else { return }
+        if preview || !installed {
+            adoptInterval(value)
+            intervalText = String(value)
+            activity = preview ? "预览：查询间隔已保存，下次开启生效。" : "查询间隔已保存，将在首次开启守护时应用。"
+        } else { perform("setInterval", intervalOverride: value) }
+    }
+    func resetInterval() {
+        guard !busy else { return }
+        intervalText = String(GuardSettings.defaultIntervalMS)
+        saveInterval()
+    }
+    private func adoptAutoRestore(_ value: Bool) {
+        autoRestore = value
+        UserDefaults.standard.set(value, forKey: "autoRestorePreference")
+    }
+    func setAutoRestore(_ value: Bool) {
+        guard !busy else { return }
+        let old = autoRestore
+        adoptAutoRestore(value)
+        if installed && !preview { perform("setAutoRestore", autoRestoreOverride: value, rollbackAutoRestore: old) }
+    }
     func setBoot(_ value: Bool) {
         guard !busy else { return }
         let old = boot
@@ -153,7 +197,8 @@ final class GuardModel: ObservableObject {
         UserDefaults.standard.set(value, forKey: "bootPreference")
         if installed { perform("boot", rollbackBoot: old) }
     }
-    func perform(_ action: String, rollbackBoot: Bool? = nil, timeoutOverride: Int? = nil, completion: ((Bool) -> Void)? = nil) {
+    func perform(_ action: String, rollbackBoot: Bool? = nil, timeoutOverride: Int? = nil, intervalOverride: Int? = nil,
+                 autoRestoreOverride: Bool? = nil, rollbackAutoRestore: Bool? = nil, completion: ((Bool) -> Void)? = nil) {
         guard !busy else { return }
         if preview {
             switch action {
@@ -171,6 +216,8 @@ final class GuardModel: ObservableObject {
         let script = authorizationScript(script: installer, pid: getpid())
         let selectedBoot = boot
         let selectedTimeoutMS = action == "enable" ? timeoutMS : timeoutOverride
+        let selectedIntervalMS = action == "enable" ? intervalMS : intervalOverride
+        let selectedAutoRestore = action == "enable" ? autoRestore : autoRestoreOverride
         pendingAction = action
         busy = true
         activity = "正在处理…"
@@ -209,7 +256,8 @@ final class GuardModel: ObservableObject {
                 guard let command = ControlAction(rawValue: action), command != .prepareUpgrade, command != .ping else {
                     throw ControlFailure("操作不被允许。")
                 }
-                let reply = try requestControl(ControlRequest(command, boot: selectedBoot, timeoutMS: selectedTimeoutMS))
+                let reply = try requestControl(ControlRequest(command, boot: selectedBoot, timeoutMS: selectedTimeoutMS,
+                                                              intervalMS: selectedIntervalMS, autoRestore: selectedAutoRestore))
                 result += reply.output
                 success = reply.success
             } catch { result = String(describing: error) }
@@ -226,9 +274,17 @@ final class GuardModel: ObservableObject {
                     self.adoptTimeout(value)
                     self.timeoutText = String(value)
                 }
+                if capturedSuccess && action == "setInterval", let value = selectedIntervalMS {
+                    self.adoptInterval(value)
+                    self.intervalText = String(value)
+                }
+                if !capturedSuccess, let old = rollbackAutoRestore { self.adoptAutoRestore(old) }
                 self.refresh()
                 if capturedSuccess {
-                    self.activity = action == "diagnostics" ? "诊断信息已读取。" : action == "setTimeout" ? "超时已保存，下次开启守护生效。" : "操作完成。"
+                    let done = ["diagnostics": "诊断信息已读取。", "setTimeout": "超时已保存，下次开启守护生效。",
+                                "setInterval": "查询间隔已保存，下次开启守护生效。",
+                                "setAutoRestore": self.autoRestore ? "已开启自动恢复网络，立即生效。" : "已关闭自动恢复网络，立即生效。"]
+                    self.activity = done[action] ?? "操作完成。"
                 } else {
                     self.activity = capturedResult.contains("-128") ? "已取消管理员授权。" : "操作未完成，请查看详细信息。"
                     self.showDetails = true
@@ -946,6 +1002,7 @@ struct GuardView: View {
         VStack(alignment: .leading, spacing: 16) {
             pageHeading("守护设置", kicker: GuardPage.settings.kicker, subtitle: "按你的习惯，安排每一次连接。")
             timeoutEditor
+            recoveryPanel
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 14) {
                     settingIcon("sunrise", tint: Zine.amber)
@@ -961,7 +1018,7 @@ struct GuardView: View {
                 Rectangle().fill(Zine.edge).frame(height: 1)
                 HStack(alignment: .top, spacing: 9) {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundColor(Zine.amber).padding(.top, 1)
-                    Text("开机时 Surge 未就绪也会锁网。关闭守护后若保留此选项，下次开机会重新布防。")
+                    Text("开机时 Surge 未就绪也会锁网；开启“自动恢复网络”后，Surge 就绪即自动解锁。关闭守护后若保留此选项，下次开机会重新布防。")
                         .foregroundColor(Zine.secondary).lineSpacing(4)
                 }.font(.system(size: 12))
             }.padding(20).modifier(ComicPanel(spine: Zine.amber))
@@ -995,6 +1052,71 @@ struct GuardView: View {
             }.padding(.horizontal, 4).padding(.top, 4).padding(.bottom, 8)
         }.frame(maxWidth: 660).frame(maxWidth: .infinity)
         }
+    }
+
+    private var intervalRow: some View {
+        let unchanged = model.parsedInterval == nil || model.parsedInterval == model.intervalMS
+        let fieldBorder: Color = model.intervalInputError == nil ? Zine.edge : Zine.hot
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 14) {
+                settingIcon("metronome", tint: Zine.cyan)
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("查询间隔").font(.system(size: 14, weight: .black))
+                    Text("默认 20 ms · 输入 5～1000 的整数")
+                        .font(.system(size: 11)).foregroundColor(Zine.secondary)
+                }
+                Spacer()
+                HStack(spacing: 6) {
+                    TextField("20", text: $model.intervalText)
+                        .textFieldStyle(.plain).multilineTextAlignment(.trailing)
+                        .font(.system(size: 15, weight: .black, design: .monospaced))
+                        .onSubmit { model.saveInterval() }
+                        .accessibilityIdentifier("intervalInput")
+                    Text("ms").font(.system(size: 11, weight: .bold)).foregroundColor(Zine.secondary)
+                }.padding(.horizontal, 12).frame(width: 112, height: 36)
+                    .background(Rectangle().fill(Zine.ink))
+                    .overlay(Rectangle().stroke(fieldBorder, lineWidth: 2))
+                    .disabled(model.busy)
+                Button("保存") { model.saveInterval() }.buttonStyle(SlantButton())
+                    .disabled(model.busy || unchanged)
+                    .accessibilityIdentifier("saveInterval")
+            }
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 6) {
+                    if let error = model.intervalInputError {
+                        Text(error).foregroundColor(Zine.hot)
+                    } else {
+                        Text("已保存 \(model.intervalMS) ms，下次开启守护生效。").foregroundColor(Zine.secondary)
+                    }
+                    Text("两次模式查询之间的等待。越小越快发现增强模式被关闭，越大越省电；Surge 退出和系统代理变化不受影响，始终立即触发。")
+                        .foregroundColor(Zine.secondary).fixedSize(horizontal: false, vertical: true)
+                }.font(.system(size: 11)).lineSpacing(3)
+                Spacer(minLength: 12)
+                Button("恢复默认") { model.resetInterval() }.buttonStyle(HoverLink())
+                    .disabled(model.busy)
+                    .accessibilityIdentifier("resetInterval")
+            }
+        }
+    }
+
+    private var recoveryPanel: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 14) {
+                settingIcon("arrow.counterclockwise", tint: Zine.acid)
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("自动恢复网络").font(.system(size: 14, weight: .black))
+                    Text("Surge 恢复正常后自动解锁，无需手动操作。").font(.system(size: 12)).foregroundColor(Zine.secondary)
+                }
+                Spacer()
+                Toggle("自动恢复网络", isOn: Binding(get: { model.autoRestore }, set: { model.setAutoRestore($0) }))
+                    .labelsHidden().toggleStyle(.switch).tint(Zine.acid)
+                    .disabled(model.busy).accessibilityIdentifier("autoRestore")
+            }
+            Rectangle().fill(Zine.edge).frame(height: 1)
+            Text("锁网后每秒检查一次，Surge 运行且增强模式、系统代理连续 3 秒都已开启时，先重新布防再恢复网络；系统代理 15 秒内未生效会重新锁网。手动断网和备份损坏不会自动恢复。修改立即生效。")
+                .font(.system(size: 11)).foregroundColor(Zine.secondary).lineSpacing(3)
+                .fixedSize(horizontal: false, vertical: true)
+        }.padding(20).modifier(ComicPanel(spine: Zine.acid))
     }
 
     private var timeoutEditor: some View {
@@ -1040,6 +1162,8 @@ struct GuardView: View {
                     .disabled(model.busy)
                     .accessibilityIdentifier("resetTimeout")
             }
+            Rectangle().fill(Zine.edge).frame(height: 1)
+            intervalRow
             if model.engineOutdated {
                 Text("旧版后台尚待升级，请先用旧版关闭并恢复网络。")
                     .font(.system(size: 11, weight: .bold)).foregroundColor(Zine.amber)
