@@ -254,34 +254,33 @@ private enum GuardPalette {
     static let spaceLift = Color(red: 0.075, green: 0.085, blue: 0.115)
 }
 
-/// Each protection state is drawn as its own planet: Earth while guarding, Mars when locked,
-/// a sun-like star while the state is unconfirmed, and grey Mercury when idle.
+/// Each protection state is drawn as a glowing planet whose surface is a slow swirl of colour:
+/// teal and blue while guarding, ember red when locked, gold while unconfirmed, slate when idle.
 private struct PlanetStyle {
-    var highlight: Color
-    var base: Color
+    var swirl: [Color]
     var shade: Color
     var glow: Color
     var glowStrength: Double
+    var swirlStrength: Double
+    var speed: Double
     var moon: Bool
-    var pulse: Bool
     init(_ indicator: GuardIndicator) {
+        func rgb(_ hex: UInt32) -> Color {
+            Color(red: Double((hex >> 16) & 0xFF) / 255, green: Double((hex >> 8) & 0xFF) / 255, blue: Double(hex & 0xFF) / 255)
+        }
         switch indicator {
         case .protecting:
-            highlight = Color(red: 0.70, green: 0.97, blue: 0.88); base = Color(red: 0.20, green: 0.64, blue: 0.58)
-            shade = Color(red: 0.03, green: 0.14, blue: 0.20); glow = GuardPalette.mint
-            glowStrength = 0.42; moon = true; pulse = false
+            swirl = [rgb(0x2DD4BF), rgb(0x3B82F6), rgb(0x4ADE80)]; shade = rgb(0x04121C); glow = rgb(0x34D399)
+            glowStrength = 0.45; swirlStrength = 0.78; speed = 1; moon = true
         case .locked:
-            highlight = Color(red: 1.00, green: 0.80, blue: 0.62); base = Color(red: 0.86, green: 0.40, blue: 0.22)
-            shade = Color(red: 0.24, green: 0.06, blue: 0.05); glow = Color(red: 1, green: 0.52, blue: 0.30)
-            glowStrength = 0.40; moon = false; pulse = false
+            swirl = [rgb(0xFB923C), rgb(0xEF4444), rgb(0xFBBF24)]; shade = rgb(0x1C0705); glow = rgb(0xFB7C4A)
+            glowStrength = 0.42; swirlStrength = 0.74; speed = 0.8; moon = false
         case .attention:
-            highlight = Color(red: 1.00, green: 0.96, blue: 0.74); base = Color(red: 0.94, green: 0.73, blue: 0.26)
-            shade = Color(red: 0.34, green: 0.19, blue: 0.04); glow = Color(red: 1, green: 0.82, blue: 0.36)
-            glowStrength = 0.46; moon = false; pulse = true
+            swirl = [rgb(0xFDE047), rgb(0xF59E0B), rgb(0xFEF3C7)]; shade = rgb(0x231504); glow = rgb(0xFACC15)
+            glowStrength = 0.45; swirlStrength = 0.70; speed = 1.3; moon = false
         case .inactive:
-            highlight = Color(red: 0.82, green: 0.84, blue: 0.86); base = Color(red: 0.44, green: 0.47, blue: 0.51)
-            shade = Color(red: 0.09, green: 0.10, blue: 0.12); glow = Color(red: 0.70, green: 0.76, blue: 0.82)
-            glowStrength = 0.14; moon = false; pulse = false
+            swirl = [rgb(0x64748B), rgb(0x334155), rgb(0x94A3B8)]; shade = rgb(0x0B0E14); glow = rgb(0x94A3B8)
+            glowStrength = 0.16; swirlStrength = 0.55; speed = 0.45; moon = false
         }
     }
 }
@@ -294,78 +293,100 @@ private struct PlanetView: View {
         TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !animated)) { timeline in
             Canvas { context, size in
                 PlanetView.draw(in: &context, size: size, style: style,
-                                time: timeline.date.timeIntervalSinceReferenceDate, active: indicator != .inactive)
+                                time: timeline.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 3600))
             }
         }.accessibilityHidden(true)
     }
 
-    private static func draw(in context: inout GraphicsContext, size: CGSize, style: PlanetStyle, time: Double, active: Bool) {
+    private static func draw(in context: inout GraphicsContext, size: CGSize, style: PlanetStyle, time: Double) {
         let center = CGPoint(x: size.width / 2, y: size.height / 2)
         let radius = min(size.width, size.height) * 0.30
-        let pulse = style.pulse ? 0.82 + 0.18 * sin(time * 2.2) : 1
+        let t = time * style.speed
+        let breathe = 0.85 + 0.15 * sin(time * 1.6)
         func circle(_ point: CGPoint, _ r: CGFloat) -> Path {
             Path(ellipseIn: CGRect(x: point.x - r, y: point.y - r, width: r * 2, height: r * 2))
         }
 
-        // Atmosphere glow.
+        // Atmosphere glow, breathing slowly.
         context.drawLayer { layer in
-            layer.addFilter(.blur(radius: radius * 0.42))
-            layer.fill(circle(center, radius * 1.18), with: .color(style.glow.opacity(style.glowStrength * pulse)))
+            layer.addFilter(.blur(radius: radius * 0.5))
+            layer.fill(circle(center, radius * 1.15), with: .color(style.glow.opacity(style.glowStrength * breathe)))
         }
 
         // Orbit: a tilted ellipse whose back half passes behind the planet.
-        let tilt = CGAffineTransform(rotationAngle: -0.24)
-        let orbitX = radius * 1.78, orbitY = radius * 0.46
+        let tilt = CGAffineTransform(rotationAngle: -0.35)
+        let orbitX = radius * 1.75, orbitY = radius * 0.42
         func orbitPoint(_ angle: Double) -> CGPoint {
             let raw = CGPoint(x: orbitX * CGFloat(cos(angle)), y: orbitY * CGFloat(sin(angle))).applying(tilt)
             return CGPoint(x: raw.x + center.x, y: raw.y + center.y)
         }
         func orbitArc(from start: Double, to end: Double) -> Path {
             var path = Path()
-            let steps = 64
+            let steps = 72
             for step in 0...steps {
                 let point = orbitPoint(start + (end - start) * Double(step) / Double(steps))
                 if step == 0 { path.move(to: point) } else { path.addLine(to: point) }
             }
             return path
         }
-        let orbitColor = Color.white.opacity(active ? 0.16 : 0.08)
-        let dash: [CGFloat] = active ? [] : [3, 5]
-        context.stroke(orbitArc(from: .pi, to: 2 * .pi), with: .color(orbitColor), style: StrokeStyle(lineWidth: 1, dash: dash))
+        let orbitColor = Color.white.opacity(style.moon ? 0.18 : 0.10)
+        context.stroke(orbitArc(from: .pi, to: 2 * .pi), with: .color(orbitColor), lineWidth: 1)
 
-        let moonAngle = time * 0.55
-        let moonPoint = orbitPoint(moonAngle)
+        let moonAngle = time * 0.7
         let moonInFront = sin(moonAngle) > 0
         func drawMoon(_ context: inout GraphicsContext) {
-            let r = radius * 0.11
-            context.fill(circle(moonPoint, r), with: .radialGradient(
-                Gradient(colors: [Color.white, Color(red: 0.70, green: 0.74, blue: 0.80), Color(red: 0.22, green: 0.24, blue: 0.30)]),
-                center: CGPoint(x: moonPoint.x - r * 0.4, y: moonPoint.y - r * 0.4), startRadius: 0, endRadius: r * 1.8))
+            for step in 1...6 {
+                let trail = orbitPoint(moonAngle - Double(step) * 0.06)
+                context.fill(circle(trail, radius * 0.045), with: .color(Color.white.opacity(0.07 * Double(7 - step) / 6)))
+            }
+            let point = orbitPoint(moonAngle), r = radius * 0.075
+            context.drawLayer { layer in
+                layer.addFilter(.shadow(color: style.glow.opacity(0.9), radius: 6))
+                layer.fill(circle(point, r), with: .radialGradient(
+                    Gradient(colors: [Color.white, Color(red: 0.60, green: 0.65, blue: 0.72)]),
+                    center: CGPoint(x: point.x - r * 0.4, y: point.y - r * 0.4), startRadius: 0, endRadius: r * 1.4))
+            }
         }
         if style.moon && !moonInFront { drawMoon(&context) }
 
-        // Planet body with drifting surface bands and a soft terminator.
+        // Planet: dark base, drifting blurred colour fields, then volume shading and a specular highlight.
         let body = circle(center, radius)
-        context.fill(body, with: .radialGradient(
-            Gradient(colors: [style.highlight, style.base, style.shade]),
-            center: CGPoint(x: center.x - radius * 0.38, y: center.y - radius * 0.42), startRadius: 0, endRadius: radius * 1.75))
         context.drawLayer { layer in
             layer.clip(to: body)
-            for band in 0..<5 {
-                let drift = CGFloat(sin(time * 0.18 + Double(band) * 1.7)) * radius * 0.10
-                let y = center.y - radius * 0.78 + CGFloat(band) * radius * 0.36
-                let height = radius * (band % 2 == 0 ? 0.13 : 0.08)
-                layer.fill(Path(ellipseIn: CGRect(x: center.x - radius * 1.4 + drift, y: y, width: radius * 2.8, height: height)),
-                           with: .color(Color.white.opacity(active ? 0.075 : 0.04)))
+            layer.fill(body, with: .color(style.shade))
+            layer.blendMode = .plusLighter
+            layer.drawLayer { swirl in
+                swirl.blendMode = .plusLighter
+                swirl.addFilter(.blur(radius: radius * 0.32))
+                for (index, color) in style.swirl.enumerated() {
+                    let speed = 0.35 + Double(index) * 0.13, phase = Double(index) * 2.1
+                    let point = CGPoint(x: center.x + radius * 0.5 * CGFloat(cos(t * speed + phase)),
+                                        y: center.y + radius * 0.45 * CGFloat(sin(t * speed * 1.3 + phase)))
+                    swirl.fill(circle(point, radius * 0.62), with: .color(color.opacity(style.swirlStrength)))
+                }
             }
-            layer.fill(body, with: .linearGradient(
-                Gradient(colors: [Color.clear, Color.black.opacity(0.50)]),
-                startPoint: CGPoint(x: center.x - radius * 0.15, y: center.y - radius * 0.15),
-                endPoint: CGPoint(x: center.x + radius, y: center.y + radius)))
+            layer.blendMode = .normal
+            layer.fill(body, with: .radialGradient(
+                Gradient(stops: [.init(color: Color.black.opacity(0), location: 0),
+                                 .init(color: Color.black.opacity(0.15), location: 0.6),
+                                 .init(color: Color.black.opacity(0.65), location: 1)]),
+                center: CGPoint(x: center.x - radius * 0.35, y: center.y - radius * 0.4), startRadius: radius * 0.1, endRadius: radius * 1.4))
+            layer.drawLayer { shine in
+                shine.addFilter(.blur(radius: radius * 0.12))
+                shine.fill(Path(ellipseIn: CGRect(x: center.x - radius * 0.66, y: center.y - radius * 0.61, width: radius * 0.56, height: radius * 0.32)),
+                           with: .color(Color.white.opacity(0.32)))
+            }
+            layer.drawLayer { rim in
+                rim.addFilter(.blur(radius: radius * 0.06))
+                rim.stroke(body, with: .color(style.glow.opacity(style.moon ? 0.55 : 0.40)), lineWidth: radius * 0.08)
+            }
         }
-        context.stroke(body, with: .color(Color.white.opacity(0.10)), lineWidth: 1)
+        context.stroke(body, with: .linearGradient(
+            Gradient(colors: [Color.white.opacity(0.45), Color.white.opacity(0.05), Color.white.opacity(0.12)]),
+            startPoint: CGPoint(x: center.x - radius, y: center.y - radius), endPoint: CGPoint(x: center.x + radius, y: center.y + radius)),
+            lineWidth: 1.2)
 
-        context.stroke(orbitArc(from: 0, to: .pi), with: .color(orbitColor), style: StrokeStyle(lineWidth: 1, dash: dash))
+        context.stroke(orbitArc(from: 0, to: .pi), with: .color(orbitColor), lineWidth: 1)
         if style.moon && moonInFront { drawMoon(&context) }
     }
 }
@@ -574,7 +595,7 @@ struct GuardView: View {
 
     private var overview: some View {
         VStack(spacing: 0) {
-            PlanetView(indicator: indicator, animated: !reduceMotion && indicator != .inactive)
+            PlanetView(indicator: indicator, animated: !reduceMotion)
                 .frame(width: 420, height: 228)
                 .id(indicator)
                 .transition(.opacity)
@@ -749,7 +770,7 @@ struct GuardView: View {
                     .buttonStyle(PillButton()).disabled(model.busy).accessibilityIdentifier("readDiagnostics")
             }
             HStack(spacing: 14) {
-                PlanetView(indicator: indicator, animated: false).frame(width: 44, height: 44)
+                PlanetView(indicator: indicator, animated: !reduceMotion).frame(width: 44, height: 44)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(model.title).font(.system(size: 14, weight: .semibold))
                     Text(model.detail).font(.system(size: 11)).foregroundStyle(GuardPalette.secondary).lineLimit(1)
