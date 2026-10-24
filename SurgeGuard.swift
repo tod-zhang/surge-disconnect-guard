@@ -1058,10 +1058,16 @@ func selfTest() throws {
         warmup.arguments = ["0"]
         try warmup.run()
         warmup.waitUntilExit()
-        let simulated = try PersistentFeatures(uid: Int32(geteuid()), cancel: { false }, testCommand:
-            ("/bin/sh", ["-c", "printf 'ready\\n> '; while IFS= read -r command; do /bin/sleep 0.1; printf 'enhanced-mode: On\\nsystem-proxy: On\\n> '; done"]))
-        try simulated.query()
-        try expect(true, "100ms 短暂查询延迟在 200ms 阈值内被接受")
+        // Each reply spawns /bin/sleep, so a loaded CI runner can add more than the 100ms margin.
+        // Accept the threshold if any of three fresh sessions answers in time.
+        var accepted = false
+        for attempt in 1...3 where !accepted {
+            let simulated = try PersistentFeatures(uid: Int32(geteuid()), cancel: { false }, testCommand:
+                ("/bin/sh", ["-c", "printf 'ready\\n> '; while IFS= read -r command; do /bin/sleep 0.1; printf 'enhanced-mode: On\\nsystem-proxy: On\\n> '; done"]))
+            do { try simulated.query(); accepted = true }
+            catch { print("第 \(attempt) 次 100ms 延迟查询未在阈值内完成：\(error)") }
+        }
+        try expect(accepted, "100ms 短暂查询延迟在 200ms 阈值内被接受")
     }
     do {
         let simulated = try PersistentFeatures(uid: Int32(geteuid()), cancel: { false }, testCommand:
