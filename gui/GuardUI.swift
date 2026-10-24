@@ -1160,11 +1160,16 @@ struct GuardView: View {
                                   : "将替换当前应用并自动重新打开。新版首次操作需重新授权一次。")
             }
     }
+    private var downloadButton: some View {
+        Button("下载更新") { updater.download() }.buttonStyle(SlantButton(fill: Zine.acid))
+            .accessibilityIdentifier("downloadUpdate")
+    }
     @ViewBuilder private var updateButton: some View {
         switch updater.phase {
-        case .available, .failed where updater.candidate != nil:
-            Button("下载更新") { updater.download() }.buttonStyle(SlantButton(fill: Zine.acid))
-                .accessibilityIdentifier("downloadUpdate")
+        case .available:
+            downloadButton
+        case .failed where updater.candidate != nil:
+            downloadButton
         case .downloading:
             Text("\(Int(updater.progress * 100))%").font(.system(size: 13, weight: .black, design: .monospaced)).foregroundColor(Zine.cyan)
         case .ready, .installing:
