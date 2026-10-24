@@ -254,33 +254,33 @@ private enum GuardPalette {
     static let spaceLift = Color(red: 0.075, green: 0.085, blue: 0.115)
 }
 
-/// Each protection state is drawn as a glowing planet whose surface is a slow swirl of colour:
-/// teal and blue while guarding, ember red when locked, gold while unconfirmed, slate when idle.
+/// Each protection state is drawn as a cel-shaded, ringed cartoon planet: mint while guarding,
+/// coral when locked, gold while unconfirmed and slate when idle. Its surface keeps rotating.
 private struct PlanetStyle {
-    var swirl: [Color]
+    var base: Color
+    var land: Color
     var shade: Color
+    var ring: Color
+    var ringShade: Color
     var glow: Color
-    var glowStrength: Double
-    var swirlStrength: Double
-    var speed: Double
-    var moon: Bool
+    var cloud: Color
     init(_ indicator: GuardIndicator) {
         func rgb(_ hex: UInt32) -> Color {
             Color(red: Double((hex >> 16) & 0xFF) / 255, green: Double((hex >> 8) & 0xFF) / 255, blue: Double(hex & 0xFF) / 255)
         }
         switch indicator {
         case .protecting:
-            swirl = [rgb(0x2DD4BF), rgb(0x3B82F6), rgb(0x4ADE80)]; shade = rgb(0x04121C); glow = rgb(0x34D399)
-            glowStrength = 0.45; swirlStrength = 0.78; speed = 1; moon = true
+            base = rgb(0x7EEAD0); land = rgb(0x3FBF9F); shade = rgb(0x2E6F93)
+            ring = rgb(0xFFE7A3); ringShade = rgb(0xE0A86A); glow = rgb(0x5EF0C8); cloud = rgb(0xFFFFFF)
         case .locked:
-            swirl = [rgb(0xFB923C), rgb(0xEF4444), rgb(0xFBBF24)]; shade = rgb(0x1C0705); glow = rgb(0xFB7C4A)
-            glowStrength = 0.42; swirlStrength = 0.74; speed = 0.8; moon = false
+            base = rgb(0xFFA275); land = rgb(0xE2643F); shade = rgb(0x8E3657)
+            ring = rgb(0xFFD9C2); ringShade = rgb(0xD98A7A); glow = rgb(0xFF8A5B); cloud = rgb(0xFFF1E8)
         case .attention:
-            swirl = [rgb(0xFDE047), rgb(0xF59E0B), rgb(0xFEF3C7)]; shade = rgb(0x231504); glow = rgb(0xFACC15)
-            glowStrength = 0.45; swirlStrength = 0.70; speed = 1.3; moon = false
+            base = rgb(0xFFDE6E); land = rgb(0xF3B23C); shade = rgb(0xB4693C)
+            ring = rgb(0xFFF6D6); ringShade = rgb(0xE7BE7A); glow = rgb(0xFFD75A); cloud = rgb(0xFFFDF2)
         case .inactive:
-            swirl = [rgb(0x64748B), rgb(0x334155), rgb(0x94A3B8)]; shade = rgb(0x0B0E14); glow = rgb(0x94A3B8)
-            glowStrength = 0.16; swirlStrength = 0.55; speed = 0.45; moon = false
+            base = rgb(0xB8C2D6); land = rgb(0x8E9AB4); shade = rgb(0x56607D)
+            ring = rgb(0xDCE3EF); ringShade = rgb(0x9EA9C2); glow = rgb(0xA9B6CF); cloud = rgb(0xF2F5FA)
         }
     }
 }
@@ -298,96 +298,106 @@ private struct PlanetView: View {
         }.accessibilityHidden(true)
     }
 
+    private static let ink = Color(red: 0.10, green: 0.11, blue: 0.20)
+
+    private static func ellipse(_ center: CGPoint, _ rx: CGFloat, _ ry: CGFloat, angle: CGFloat = 0) -> Path {
+        Path(ellipseIn: CGRect(x: -rx, y: -ry, width: rx * 2, height: ry * 2))
+            .applying(CGAffineTransform(translationX: center.x, y: center.y).rotated(by: angle))
+    }
+
+    private static func sparkle(_ center: CGPoint, _ size: CGFloat) -> Path {
+        var path = Path()
+        path.move(to: CGPoint(x: center.x, y: center.y - size))
+        path.addQuadCurve(to: CGPoint(x: center.x + size, y: center.y), control: center)
+        path.addQuadCurve(to: CGPoint(x: center.x, y: center.y + size), control: center)
+        path.addQuadCurve(to: CGPoint(x: center.x - size, y: center.y), control: center)
+        path.addQuadCurve(to: CGPoint(x: center.x, y: center.y - size), control: center)
+        return path
+    }
+
     private static func draw(in context: inout GraphicsContext, size: CGSize, style: PlanetStyle, time: Double) {
-        let center = CGPoint(x: size.width / 2, y: size.height / 2)
-        let radius = min(size.width, size.height) * 0.30
-        let t = time * style.speed
-        let breathe = 0.85 + 0.15 * sin(time * 1.6)
-        func circle(_ point: CGPoint, _ r: CGFloat) -> Path {
-            Path(ellipseIn: CGRect(x: point.x - r, y: point.y - r, width: r * 2, height: r * 2))
-        }
+        let radius = min(size.width, size.height) * 0.25
+        let center = CGPoint(x: size.width / 2, y: size.height / 2 + radius * 0.03 * CGFloat(sin(time * 1.2)))
+        let line = max(1, radius * 0.03)
 
-        // Atmosphere glow, breathing slowly.
         context.drawLayer { layer in
-            layer.addFilter(.blur(radius: radius * 0.5))
-            layer.fill(circle(center, radius * 1.15), with: .color(style.glow.opacity(style.glowStrength * breathe)))
+            layer.addFilter(.blur(radius: radius * 0.45))
+            layer.fill(PlanetView.ellipse(center, radius * 1.1, radius * 1.1), with: .color(style.glow.opacity(0.30)))
         }
 
-        // Orbit: a tilted ellipse whose back half passes behind the planet.
-        let tilt = CGAffineTransform(rotationAngle: -0.35)
-        let orbitX = radius * 1.75, orbitY = radius * 0.42
-        func orbitPoint(_ angle: Double) -> CGPoint {
-            let raw = CGPoint(x: orbitX * CGFloat(cos(angle)), y: orbitY * CGFloat(sin(angle))).applying(tilt)
-            return CGPoint(x: raw.x + center.x, y: raw.y + center.y)
-        }
-        func orbitArc(from start: Double, to end: Double) -> Path {
+        // Flat ring: an ink outline, a pale band and a thin inner shade line, split into back and front halves.
+        let tilt = -0.32, ringX = radius * 1.62, ringY = radius * 0.40, band = radius * 0.16
+        func ringArc(inset: CGFloat, front: Bool) -> Path {
             var path = Path()
-            let steps = 72
+            let steps = 72, start = front ? 0 : Double.pi
             for step in 0...steps {
-                let point = orbitPoint(start + (end - start) * Double(step) / Double(steps))
+                let angle = start + Double.pi * Double(step) / Double(steps)
+                let x: CGFloat = (ringX - inset) * CGFloat(cos(angle))
+                let y: CGFloat = (ringY - inset) * CGFloat(sin(angle))
+                let point = CGPoint(x: x, y: y).applying(CGAffineTransform(rotationAngle: CGFloat(tilt)))
+                    .applying(CGAffineTransform(translationX: center.x, y: center.y))
                 if step == 0 { path.move(to: point) } else { path.addLine(to: point) }
             }
             return path
         }
-        let orbitColor = Color.white.opacity(style.moon ? 0.18 : 0.10)
-        context.stroke(orbitArc(from: .pi, to: 2 * .pi), with: .color(orbitColor), lineWidth: 1)
-
-        let moonAngle = time * 0.7
-        let moonInFront = sin(moonAngle) > 0
-        func drawMoon(_ context: inout GraphicsContext) {
-            for step in 1...6 {
-                let trail = orbitPoint(moonAngle - Double(step) * 0.06)
-                context.fill(circle(trail, radius * 0.045), with: .color(Color.white.opacity(0.07 * Double(7 - step) / 6)))
-            }
-            let point = orbitPoint(moonAngle), r = radius * 0.075
-            context.drawLayer { layer in
-                layer.addFilter(.shadow(color: style.glow.opacity(0.9), radius: 6))
-                layer.fill(circle(point, r), with: .radialGradient(
-                    Gradient(colors: [Color.white, Color(red: 0.60, green: 0.65, blue: 0.72)]),
-                    center: CGPoint(x: point.x - r * 0.4, y: point.y - r * 0.4), startRadius: 0, endRadius: r * 1.4))
-            }
+        func drawRing(_ context: inout GraphicsContext, front: Bool) {
+            context.stroke(ringArc(inset: 0, front: front), with: .color(PlanetView.ink), style: StrokeStyle(lineWidth: band + line * 1.7, lineCap: .butt))
+            context.stroke(ringArc(inset: 0, front: front), with: .color(style.ring), style: StrokeStyle(lineWidth: band, lineCap: .butt))
+            context.stroke(ringArc(inset: band * 0.18, front: front), with: .color(style.ringShade), style: StrokeStyle(lineWidth: band * 0.28, lineCap: .butt))
         }
-        if style.moon && !moonInFront { drawMoon(&context) }
+        drawRing(&context, front: false)
 
-        // Planet: dark base, drifting blurred colour fields, then volume shading and a specular highlight.
-        let body = circle(center, radius)
+        let body = PlanetView.ellipse(center, radius, radius)
         context.drawLayer { layer in
             layer.clip(to: body)
-            layer.fill(body, with: .color(style.shade))
-            layer.blendMode = .plusLighter
-            layer.drawLayer { swirl in
-                swirl.blendMode = .plusLighter
-                swirl.addFilter(.blur(radius: radius * 0.32))
-                for (index, color) in style.swirl.enumerated() {
-                    let speed = 0.35 + Double(index) * 0.13, phase = Double(index) * 2.1
-                    let point = CGPoint(x: center.x + radius * 0.5 * CGFloat(cos(t * speed + phase)),
-                                        y: center.y + radius * 0.45 * CGFloat(sin(t * speed * 1.3 + phase)))
-                    swirl.fill(circle(point, radius * 0.62), with: .color(color.opacity(style.swirlStrength)))
+            layer.fill(body, with: .color(style.base))
+            // Continents and cloud streaks drift sideways, wrapping around, so the planet appears to spin.
+            let span = radius * 3.2
+            let landOffset = (CGFloat(time) * radius * 0.12).truncatingRemainder(dividingBy: span)
+            let lands: [(CGFloat, CGFloat, CGFloat, CGFloat)] = [(0, -0.35, 0.42, 0.22), (0.9, 0.15, 0.55, 0.28), (1.9, -0.05, 0.35, 0.2),
+                                                                 (2.5, 0.5, 0.4, 0.18), (1.4, -0.6, 0.28, 0.12)]
+            for land in lands {
+                for wrap in -1...1 {
+                    let drift: CGFloat = (land.0 * radius + landOffset).truncatingRemainder(dividingBy: span)
+                    let x: CGFloat = center.x - radius * 1.6 + drift + CGFloat(wrap) * span
+                    let y = center.y + land.1 * radius
+                    layer.fill(PlanetView.ellipse(CGPoint(x: x, y: y), land.2 * radius, land.3 * radius, angle: 0.15), with: .color(style.land))
+                    layer.fill(PlanetView.ellipse(CGPoint(x: x + land.2 * radius * 0.6, y: y + land.3 * radius * 0.5), land.2 * radius * 0.6, land.3 * radius * 0.8, angle: -0.3),
+                               with: .color(style.land))
                 }
             }
-            layer.blendMode = .normal
-            layer.fill(body, with: .radialGradient(
-                Gradient(stops: [.init(color: Color.black.opacity(0), location: 0),
-                                 .init(color: Color.black.opacity(0.15), location: 0.6),
-                                 .init(color: Color.black.opacity(0.65), location: 1)]),
-                center: CGPoint(x: center.x - radius * 0.35, y: center.y - radius * 0.4), startRadius: radius * 0.1, endRadius: radius * 1.4))
-            layer.drawLayer { shine in
-                shine.addFilter(.blur(radius: radius * 0.12))
-                shine.fill(Path(ellipseIn: CGRect(x: center.x - radius * 0.66, y: center.y - radius * 0.61, width: radius * 0.56, height: radius * 0.32)),
-                           with: .color(Color.white.opacity(0.32)))
+            let cloudOffset = (CGFloat(time) * radius * 0.2).truncatingRemainder(dividingBy: span)
+            let clouds: [(CGFloat, CGFloat, CGFloat)] = [(0.3, -0.15, 0.55), (1.6, 0.35, 0.7), (2.6, -0.5, 0.45)]
+            for cloud in clouds {
+                for wrap in -1...1 {
+                    let drift: CGFloat = (cloud.0 * radius + cloudOffset).truncatingRemainder(dividingBy: span)
+                    let x: CGFloat = center.x - radius * 1.6 + drift + CGFloat(wrap) * span
+                    layer.fill(Path(roundedRect: CGRect(x: x, y: center.y + cloud.1 * radius, width: cloud.2 * radius, height: radius * 0.07),
+                                    cornerRadius: radius * 0.035), with: .color(style.cloud.opacity(0.9)))
+                }
             }
-            layer.drawLayer { rim in
-                rim.addFilter(.blur(radius: radius * 0.06))
-                rim.stroke(body, with: .color(style.glow.opacity(style.moon ? 0.55 : 0.40)), lineWidth: radius * 0.08)
-            }
+            // Hard-edged cel shadow and rim light.
+            var shadow = body
+            shadow.addPath(PlanetView.ellipse(CGPoint(x: center.x - radius * 0.28, y: center.y - radius * 0.24), radius * 1.02, radius * 1.02))
+            layer.fill(shadow, with: .color(style.shade.opacity(0.78)), style: FillStyle(eoFill: true))
+            var rim = body
+            rim.addPath(PlanetView.ellipse(CGPoint(x: center.x + radius * 0.06, y: center.y + radius * 0.07), radius * 0.97, radius * 0.97))
+            layer.fill(rim, with: .color(Color.white.opacity(0.55)), style: FillStyle(eoFill: true))
         }
-        context.stroke(body, with: .linearGradient(
-            Gradient(colors: [Color.white.opacity(0.45), Color.white.opacity(0.05), Color.white.opacity(0.12)]),
-            startPoint: CGPoint(x: center.x - radius, y: center.y - radius), endPoint: CGPoint(x: center.x + radius, y: center.y + radius)),
-            lineWidth: 1.2)
+        context.fill(PlanetView.ellipse(CGPoint(x: center.x - radius * 0.48, y: center.y - radius * 0.48), radius * 0.17, radius * 0.08, angle: -0.75),
+                     with: .color(Color.white))
+        context.fill(PlanetView.ellipse(CGPoint(x: center.x - radius * 0.22, y: center.y - radius * 0.66), radius * 0.045, radius * 0.045), with: .color(Color.white))
+        context.stroke(body, with: .color(PlanetView.ink), lineWidth: line)
+        drawRing(&context, front: true)
 
-        context.stroke(orbitArc(from: 0, to: .pi), with: .color(orbitColor), lineWidth: 1)
-        if style.moon && moonInFront { drawMoon(&context) }
+        let sparkles: [(CGFloat, CGFloat, CGFloat, Double)] = [(-1.25, -0.95, 0.16, 0), (1.3, -0.75, 0.11, 1.3), (1.05, 0.95, 0.13, 2.4),
+                                                               (-1.15, 0.75, 0.08, 3.1), (0.2, -1.25, 0.07, 4.2)]
+        for item in sparkles {
+            let twinkle = 0.5 + 0.5 * sin(time * 2.2 + item.3)
+            let point = CGPoint(x: center.x + item.0 * radius, y: center.y + item.1 * radius)
+            let scale = CGFloat(0.6 + 0.4 * twinkle)
+            context.fill(PlanetView.sparkle(point, item.2 * radius * scale), with: .color(Color.white.opacity(0.35 + 0.65 * twinkle)))
+        }
     }
 }
 
