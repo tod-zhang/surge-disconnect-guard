@@ -148,7 +148,7 @@ final class GuardModel: ObservableObject {
         UserDefaults.standard.set(value, forKey: "bootPreference")
         if installed { perform("boot", rollbackBoot: old) }
     }
-    func perform(_ action: String, rollbackBoot: Bool? = nil, timeoutOverride: Int? = nil) {
+    func perform(_ action: String, rollbackBoot: Bool? = nil, timeoutOverride: Int? = nil, completion: ((Bool) -> Void)? = nil) {
         guard !busy else { return }
         if preview {
             switch action {
@@ -158,6 +158,7 @@ final class GuardModel: ObservableObject {
             default: break
             }
             activity = "预览操作完成，实际系统与网络未改动。"
+            completion?(true)
             return
         }
         guard let resources = Bundle.main.resourceURL else { return }
@@ -228,6 +229,7 @@ final class GuardModel: ObservableObject {
                     self.showDetails = true
                 }
                 if action == "diagnostics" { self.showDetails = true }
+                completion?(capturedSuccess)
             }
         }
     }
@@ -736,13 +738,18 @@ private struct PlanetView: View {
 
 struct GuardView: View {
     @StateObject private var model: GuardModel
+    @ObservedObject private var updater: UpdateModel
     @State private var page: GuardPage = .overview
     @State private var hoveredTab: GuardPage?
     @State private var hoveringBoot = false
     @State private var confirmUninstall = false
+    @State private var confirmUpdate = false
     @Namespace private var tabSelection
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    init(model: GuardModel = GuardModel()) { _model = StateObject(wrappedValue: model) }
+    init(model: GuardModel, updater: UpdateModel) {
+        _model = StateObject(wrappedValue: model)
+        self.updater = updater
+    }
 
     private var indicator: GuardIndicator { GuardIndicator(phase: model.phase) }
     private var planet: PlanetStyle { PlanetStyle(indicator) }
@@ -781,6 +788,7 @@ struct GuardView: View {
         .frame(width: 860, height: 640)
         .preferredColorScheme(.dark)
         .sheet(isPresented: $model.showDetails) { details }
+        .onReceive(updater.$revealToken.dropFirst()) { _ in go(.settings) }
     }
 
     private var navigation: some View {
@@ -788,8 +796,18 @@ struct GuardView: View {
             HStack(spacing: 8) {
                 ForEach(GuardPage.allCases, id: \.self) { item in tabButton(item) }
             }
-            HStack {
+            HStack(spacing: 14) {
                 Spacer()
+                if updater.hasUpdate, let version = updater.candidate?.version {
+                    Button { go(.settings) } label: {
+                        Text("NEW v\(version.description)").font(.system(size: 12, weight: .black)).italic()
+                            .foregroundColor(Zine.ink)
+                            .padding(.horizontal, 16).frame(height: 26)
+                            .modifier(Sticker(fill: Zine.acid, shadow: Zine.hot))
+                    }.buttonStyle(.plain)
+                        .help("有新版本可以更新，点击查看")
+                        .accessibilityIdentifier("updateBadge")
+                }
                 if model.preview {
                     Text("安全预览").font(.system(size: 12, weight: .black)).italic()
                         .padding(.horizontal, 16).frame(height: 26)
@@ -949,6 +967,7 @@ struct GuardView: View {
                 }
                 Spacer()
             }.padding(20).modifier(ComicPanel(spine: Zine.acid))
+            updatePanel
             HStack {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("卸载后台组件").font(.system(size: 12, weight: .black))
@@ -1073,6 +1092,93 @@ struct GuardView: View {
         }.frame(maxWidth: 740).frame(maxWidth: .infinity)
     }
 
+    /// Guard must be off before the app is replaced: a new build may also carry a new engine.
+    private var guardRunning: Bool { model.installed && !["disabled", "uninstalled"].contains(model.phase) }
+    private func installUpdate() {
+        guard !model.busy, !updater.busy else { return }
+        guard guardRunning else { updater.install(); return }
+        model.perform("disable") { success in
+            if success && !guardRunning { updater.install() }
+            else if success { model.activity = "守护尚未完全关闭，暂不安装更新。" }
+        }
+    }
+    private var updatePanel: some View {
+        let ready = updater.phase == .ready
+        let tint: Color = updater.phase == .failed ? Zine.hot : (updater.hasUpdate ? Zine.acid : Zine.cyan)
+        return VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 14) {
+                settingIcon("arrow.down.circle", tint: Zine.hot)
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 8) {
+                        Text("软件更新").font(.system(size: 14, weight: .black))
+                        Text("v" + currentAppVersion).font(.system(size: 10, weight: .black, design: .monospaced))
+                            .foregroundColor(Zine.ink).padding(.horizontal, 10).frame(height: 18)
+                            .modifier(Sticker(fill: Zine.cyan, depth: 2))
+                    }
+                    Text(updater.message).font(.system(size: 12)).foregroundColor(updater.phase == .failed ? Zine.hot : Zine.secondary)
+                        .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("updateMessage")
+                }
+                Spacer(minLength: 12)
+                if updater.phase == .checking || updater.phase == .installing {
+                    ProgressView().controlSize(.small).tint(tint)
+                }
+                updateButton
+            }
+            if updater.phase == .downloading || ready {
+                GeometryReader { proxy in
+                    ZStack(alignment: .leading) {
+                        Rectangle().fill(Zine.ink)
+                        Rectangle().fill(ready ? Zine.acid : Zine.cyan)
+                            .frame(width: max(0, proxy.size.width * CGFloat(updater.progress)))
+                        Rectangle().stroke(Zine.edge, lineWidth: 1.5)
+                    }
+                }.frame(height: 10)
+                    .accessibilityElement().accessibilityLabel("下载进度").accessibilityValue("\(Int(updater.progress * 100))%")
+            }
+            Rectangle().fill(Zine.edge).frame(height: 1)
+            HStack(alignment: .center, spacing: 10) {
+                Toggle("自动检查并下载更新", isOn: $updater.autoCheck)
+                    .toggleStyle(.switch).tint(Zine.acid).controlSize(.small)
+                    .font(.system(size: 12, weight: .bold)).accessibilityIdentifier("autoUpdate")
+                Spacer()
+                Button(updater.hasUpdate ? "发布说明 ›" : "所有版本 ›") { updater.openReleasePage() }.buttonStyle(HoverLink())
+            }
+            HStack(alignment: .top, spacing: 9) {
+                Image(systemName: "checkmark.shield.fill").foregroundColor(Zine.cyan).padding(.top, 1)
+                Text(guardRunning && updater.hasUpdate
+                     ? "安装前会先“关闭并恢复网络”，再替换应用并重新打开；新版首次操作需重新授权一次，然后手动开启守护。"
+                     : "只接受自动构建上传的安装包；下载后核对 SHA-256、代码签名和版本号，安装始终由你确认。")
+                    .foregroundColor(Zine.secondary).lineSpacing(4).fixedSize(horizontal: false, vertical: true)
+            }.font(.system(size: 11))
+        }.padding(20).modifier(ComicPanel(spine: tint))
+            .confirmationDialog("安装 v\(updater.candidate?.version.description ?? "")？", isPresented: $confirmUpdate) {
+                Button(guardRunning ? "关闭并恢复网络，然后安装" : "安装并重新打开") { installUpdate() }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text(guardRunning ? "守护正在运行。将先停止守护并按备份恢复网络，再替换应用；更新后请重新开启守护。"
+                                  : "将替换当前应用并自动重新打开。新版首次操作需重新授权一次。")
+            }
+    }
+    @ViewBuilder private var updateButton: some View {
+        switch updater.phase {
+        case .available, .failed where updater.candidate != nil:
+            Button("下载更新") { updater.download() }.buttonStyle(SlantButton(fill: Zine.acid))
+                .accessibilityIdentifier("downloadUpdate")
+        case .downloading:
+            Text("\(Int(updater.progress * 100))%").font(.system(size: 13, weight: .black, design: .monospaced)).foregroundColor(Zine.cyan)
+        case .ready, .installing:
+            Button(guardRunning ? "恢复网络并安装" : "安装并重启") { confirmUpdate = true }
+                .buttonStyle(SlantButton(fill: Zine.acid, shadow: Zine.hot))
+                .disabled(model.busy || updater.phase == .installing)
+                .accessibilityIdentifier("installUpdate")
+        default:
+            Button("检查更新") { updater.check(userInitiated: true) }.buttonStyle(SlantButton(fill: Zine.cyan))
+                .disabled(updater.phase == .checking)
+                .accessibilityIdentifier("checkUpdate")
+        }
+    }
+
     private func pageHeading(_ title: String, kicker: String, subtitle: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(kicker).font(.system(size: 10, weight: .black)).tracking(3).foregroundColor(stateColor)
@@ -1106,7 +1212,7 @@ struct GuardView: View {
                 }
                 Spacer(minLength: 12)
                 Text("⌘1 守护 · ⌘2 设置 · ⌘3 诊断").font(.system(size: 10, weight: .medium)).foregroundColor(Zine.subtle)
-                Text(model.preview ? "SAFE PREVIEW" : "SURGE GUARD // 2.4.0")
+                Text(model.preview ? "SAFE PREVIEW" : "SURGE GUARD // " + currentAppVersion)
                     .font(.system(size: 10, weight: .black)).italic().tracking(1)
                     .foregroundColor(stateColor).padding(.leading, 8)
             }.padding(.horizontal, 30).frame(height: 38)
@@ -1184,6 +1290,7 @@ enum GuardIndicator: CaseIterable {
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let model = GuardModel()
+    lazy var updater = UpdateModel(preview: model.preview)
     private var window: NSWindow?
     private var statusItem: NSStatusItem?
     private let stateItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
@@ -1191,7 +1298,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var subscriptions = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let view = NSHostingView(rootView: GuardView(model: model))
+        let view = NSHostingView(rootView: GuardView(model: model, updater: updater))
         let size = view.fittingSize
         let window = NSWindow(contentRect: NSRect(origin: .zero, size: size),
                               styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)
@@ -1211,6 +1318,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         model.objectWillChange.sink { [weak self] _ in
             DispatchQueue.main.async { [weak self] in self?.updateMenuBar() }
         }.store(in: &subscriptions)
+        if let notice = updater.consumeUpdateNotice() { model.activity = notice }
+        updater.startAutomaticChecks()
         showWindow()
     }
 
@@ -1230,6 +1339,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         diagnostics.target = self
         diagnostics.tag = 1
         menu.addItem(diagnostics)
+        let update = NSMenuItem(title: "检查更新…", action: #selector(checkForUpdates), keyEquivalent: "")
+        update.target = self
+        menu.addItem(update)
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "退出界面（守护继续运行）", action: #selector(quitInterface), keyEquivalent: "q")
         quit.target = self
@@ -1243,6 +1355,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let main = NSMenu()
         let appItem = NSMenuItem()
         let appMenu = NSMenu()
+        let update = NSMenuItem(title: "检查更新…", action: #selector(checkForUpdates), keyEquivalent: "")
+        update.target = self
+        appMenu.addItem(update)
+        appMenu.addItem(.separator())
         let quit = NSMenuItem(title: "退出 Surge 断网守护界面", action: #selector(quitInterface), keyEquivalent: "q")
         quit.target = self
         appMenu.addItem(quit)
@@ -1278,6 +1394,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc private func showDiagnostics() {
         showWindow()
         model.perform("diagnostics")
+    }
+    @objc private func checkForUpdates() {
+        showWindow()
+        updater.check(userInitiated: true)
     }
     @objc private func quitInterface() { NSApp.terminate(nil) }
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -1317,14 +1437,14 @@ func uiSelfTest() -> Bool {
         guard image.size == NSSize(width: 20, height: 20),
               image.isTemplate == (indicator == .inactive), image.tiffRepresentation != nil else { return false }
     }
-    return true
+    return updaterSelfTest()
 }
 
 @main enum SurgeGuardApp {
     static func main() {
         if CommandLine.arguments.contains("--self-test") {
             let success = uiSelfTest()
-            print(success ? "PASS GUI 状态解析、菜单栏图标状态及管理员命令引用检查。未修改系统。" : "FAIL GUI 自检")
+            print(success ? "PASS GUI 状态解析、菜单栏图标状态、管理员命令引用及更新校验检查。未修改系统。" : "FAIL GUI 自检")
             exit(success ? 0 : 1)
         }
         let application = NSApplication.shared
