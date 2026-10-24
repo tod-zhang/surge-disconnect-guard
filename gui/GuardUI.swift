@@ -486,6 +486,7 @@ struct GuardView: View {
     @State private var page: GuardPage = .overview
     @State private var hoveredTab: GuardPage?
     @State private var hoveringBoot = false
+    @State private var confirmUninstall = false
     @Namespace private var tabSelection
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     init(model: GuardModel = GuardModel()) { _model = StateObject(wrappedValue: model) }
@@ -704,9 +705,15 @@ struct GuardView: View {
                     Text("先恢复网络，再移除守护和权限组件。").font(.system(size: 11)).foregroundStyle(GuardPalette.secondary)
                 }
                 Spacer()
-                Button("卸载…", role: .destructive) { model.perform("uninstall") }
+                Button("卸载…", role: .destructive) { confirmUninstall = true }
                     .buttonStyle(PillButton()).disabled(model.busy || !model.installed)
                     .accessibilityIdentifier("uninstallGuard")
+                    .confirmationDialog("确定卸载后台组件？", isPresented: $confirmUninstall) {
+                        Button("恢复网络并卸载", role: .destructive) { model.perform("uninstall") }
+                        Button("取消", role: .cancel) {}
+                    } message: {
+                        Text("将先停止守护并按备份恢复网络，再移除守护和权限组件。")
+                    }
             }.padding(.horizontal, 4).padding(.top, 4)
         }.frame(maxWidth: 640).frame(maxWidth: .infinity)
         }

@@ -35,6 +35,7 @@ class GuiControlTests(unittest.TestCase):
         controller = controller.replace("export PATH=/usr/bin:/bin:/usr/sbin:/sbin", fake_path)
         controller = controller.replace("ROOT='/Library/Application Support/SurgeDisconnectGuard'", "ROOT=" + self.quote(str(self.root)))
         controller = controller.replace('PLIST="/Library/LaunchDaemons/$LABEL.plist"', 'PLIST="' + str(self.launch) + '/$LABEL.plist"')
+        controller = controller.replace("RUN_DIR='/var/run'", "RUN_DIR=" + self.quote(str(self.base)))
         self.write(self.engine / "sgctl", controller)
         self.write(self.mock / "id", "#!/bin/bash\necho 0\n")
         self.write(self.mock / "stat", "#!/bin/bash\necho 0\n")

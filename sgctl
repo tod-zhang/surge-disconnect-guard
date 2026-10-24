@@ -6,6 +6,9 @@ ROOT='/Library/Application Support/SurgeDisconnectGuard'
 LABEL='local.surgedisconnect.guard'
 PLIST="/Library/LaunchDaemons/$LABEL.plist"
 BIN="$ROOT/surge-guard"
+CONTROL_LABEL='local.surgedisconnect.control'
+CONTROL_PLIST="$(dirname -- "$PLIST")/$CONTROL_LABEL.plist"
+RUN_DIR='/var/run'
 
 if [[ $(id -u) != 0 ]]; then
     echo '请用 sudo 运行，或双击配套 .command 文件。' >&2
@@ -21,6 +24,15 @@ stop_guard() {
     if launchctl print "system/$LABEL" >/dev/null 2>&1; then
         echo '守护仍在运行，已停止恢复操作。' >&2
         exit 1
+    fi
+}
+
+start_guard() {
+    # The boot plist is absent when start-at-boot is off; the private copy always exists.
+    if [[ -f "$ROOT/daemon.plist" ]]; then
+        launchctl bootstrap system "$ROOT/daemon.plist"
+    else
+        launchctl bootstrap system "$PLIST"
     fi
 }
 
@@ -40,11 +52,7 @@ case "${1:-status}" in
         "$BIN" persistent-check
         launchctl enable "system/$LABEL"
         if ! launchctl print "system/$LABEL" >/dev/null 2>&1; then
-            if [[ -f "$ROOT/daemon.plist" ]]; then
-                launchctl bootstrap system "$ROOT/daemon.plist"
-            else
-                launchctl bootstrap system "$PLIST"
-            fi
+            start_guard
         fi
         launchctl print "system/$LABEL" | sed -n '1,22p'
         echo '守护已启用；Surge 退出、增强模式或系统代理关闭/状态未知都会触发全机断网锁定。'
@@ -53,7 +61,7 @@ case "${1:-status}" in
         stop_guard
         "$BIN" lock
         launchctl enable "system/$LABEL"
-        launchctl bootstrap system "$PLIST"
+        start_guard
         echo '已手动触发断网，守护将持续保持锁定。'
         ;;
     status)
@@ -81,6 +89,16 @@ case "${1:-status}" in
         # If restore fails, set -e preserves the executable and backup for recovery.
         rm -f "$PLIST"
         rm -f "$ROOT/surge-guard" "$ROOT/sgctl" "$ROOT/operation.lock" "$ROOT/daemon.plist" "$ROOT/boot.enabled" "$ROOT/engine-version" "$ROOT/settings.json"
+        # The permission helper passes --keep-control and removes itself after replying.
+        # A direct terminal uninstall also removes the helper so nothing is left behind.
+        if [[ "${2:-}" != --keep-control ]]; then
+            if launchctl print "system/$CONTROL_LABEL" >/dev/null 2>&1; then
+                launchctl bootout "system/$CONTROL_LABEL" || true
+            fi
+            rm -f "$CONTROL_PLIST" "$ROOT/sg-control" "$ROOT/control-actions.sh" "$ROOT/control-client.json" \
+                "$RUN_DIR/local.surgedisconnect.control.sock" "$RUN_DIR/local.surgedisconnect.guard.status.json" \
+                "$RUN_DIR/local.surgedisconnect.settings.json"
+        fi
         rmdir "$ROOT" || true
         echo '已停止并卸载守护；已按备份恢复网络。日志保留在 /var/log/surge-disconnect-guard.log。'
         ;;

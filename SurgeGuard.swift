@@ -83,6 +83,7 @@ struct LockState: Codable, Equatable {
 
 protocol NetworkAccess {
     func view(includeWiFiPower: Bool) throws -> NetworkView
+    func interfaces() throws -> (all: Set<String>, up: Set<String>)
     func setInterfaces(_ names: Set<String>, up: Bool) -> [String]
     func setServices(_ values: [String: Service]) throws
     func setWiFi(_ values: [String: Bool]) -> [String]
@@ -369,6 +370,7 @@ final class MacNetwork: NetworkAccess {
         }
         return NetworkView(services: values, upInterfaces: flags.up, wifi: wifi, allInterfaces: flags.all)
     }
+    func interfaces() throws -> (all: Set<String>, up: Set<String>) { try interfaceState() }
     func setInterfaces(_ names: Set<String>, up: Bool) -> [String] {
         var errors: [String] = []
         for name in names.sorted() where name != "lo0" {
@@ -552,6 +554,9 @@ final class GuardEngine {
     var lastWiFiCheck = Date.distantPast
     var lastError = ""
     var lastErrorDate = Date.distantPast
+    // Preference reads and locks are throttled; interface ioctls stay on every tick.
+    static let fullEnforceInterval: TimeInterval = 0.1
+    var lastFullEnforce: TimeInterval = -.infinity
     init(network: NetworkAccess, store: StateStore) {
         self.network = network; self.store = store
         do { state = try store.load() } catch {
@@ -572,6 +577,9 @@ final class GuardEngine {
         var snapshot = LockState(reason: "预备恢复快照；守护中断后按锁定处理")
         snapshot.merge(view)
         guard ifHealthy() else { return }
+        // An unchanged snapshot is already durable on disk; skip the rewrite and fsync.
+        if let old = prepared, old.services == snapshot.services,
+           old.interfaces == snapshot.interfaces, old.wifi == snapshot.wifi { return }
         try store.savePrepared(snapshot)
         prepared = snapshot
     }
@@ -593,7 +601,33 @@ final class GuardEngine {
         }
         enforce()
     }
+    // Called about every 10 ms while locked. Newly seen interfaces are saved before
+    // their first mutation; services and Wi-Fi go through the throttled full pass.
+    func enforceTick() {
+        let now = ProcessInfo.processInfo.systemUptime
+        if now - lastFullEnforce >= Self.fullEnforceInterval { enforce(); return }
+        var errors: [String] = []
+        do {
+            let flags = try network.interfaces()
+            if !corrupted, var saved = state {
+                let before = saved
+                for name in flags.all.union(flags.up) where saved.interfaces[name] == nil {
+                    saved.interfaces[name] = flags.up.contains(name)
+                }
+                if before != saved {
+                    do { try store.save(saved) } catch { errors.append("\(error)") }
+                    state = saved
+                }
+            }
+            errors += network.setInterfaces(flags.up, up: false)
+        } catch {
+            errors.append("\(error)")
+            errors += network.emergencyCutoff()
+        }
+        report(errors)
+    }
     func enforce() {
+        lastFullEnforce = ProcessInfo.processInfo.systemUptime
         var errors: [String] = []
         do {
             // Save before each first mutation of a newly seen interface or service.
@@ -610,8 +644,11 @@ final class GuardEngine {
             }
             // Fast native ioctl closes currently UP interfaces before slower preference operations.
             errors += network.setInterfaces(quick.upInterfaces, up: false)
-            let disabled = quick.services.mapValues { Service(name: $0.name, enabled: false) }
-            do { try network.setServices(disabled) } catch { errors.append("\(error)") }
+            // Lock the system preferences only when some service still needs disabling.
+            let disabled = quick.services.filter { $0.value.enabled }.mapValues { Service(name: $0.name, enabled: false) }
+            if !disabled.isEmpty {
+                do { try network.setServices(disabled) } catch { errors.append("\(error)") }
+            }
 
             if Date().timeIntervalSince(lastWiFiCheck) >= 2 {
                 lastWiFiCheck = Date()
@@ -731,7 +768,7 @@ func daemon() throws {
                 publishStatus("locked", engine.state?.reason ?? "恢复备份不可读，已按异常处理", daemonPID: getpid(), timeoutMS: timeoutMS)
                 lastPublished = ProcessInfo.processInfo.systemUptime
             }
-            engine.enforce()
+            engine.enforceTick()
             usleep(10_000)
             continue
         }
@@ -785,17 +822,20 @@ final class MemoryNetwork: NetworkAccess {
                               allInterfaces: ["en0", "en2", "utun88"])
     var serviceFailure = false
     var mutations = 0
+    var serviceCalls = 0
     var onCutoff: (() -> Void)?
     func view(includeWiFiPower: Bool) throws -> NetworkView {
         NetworkView(services: current.services, upInterfaces: current.upInterfaces,
                     wifi: includeWiFiPower ? current.wifi : [:], allInterfaces: current.allInterfaces)
     }
+    func interfaces() throws -> (all: Set<String>, up: Set<String>) { (current.allInterfaces, current.upInterfaces) }
     func setInterfaces(_ names: Set<String>, up: Bool) -> [String] {
         mutations += 1
         if up { current.upInterfaces.formUnion(names) } else { current.upInterfaces.subtract(names) }
         return []
     }
     func setServices(_ values: [String: Service]) throws {
+        serviceCalls += 1
         if serviceFailure { throw GuardError("injected preference failure") }
         mutations += 1
         for (id, value) in values { current.services[id] = value }
@@ -901,6 +941,14 @@ func selfTest() throws {
     try fastEngine.prepare()
     try expect(!fastEngine.locked && fastNet.mutations == 0 && fastStore.preparedValue != nil,
                "布防前完成恢复快照，不改变网络")
+    fastStore.preparedValue = nil
+    try fastEngine.prepare()
+    try expect(fastStore.preparedValue == nil, "恢复快照未变化时不重复写盘")
+    fastNet.current.wifi["en0"] = false
+    try fastEngine.prepare()
+    try expect(fastStore.preparedValue?.wifi["en0"] == false, "恢复快照变化时重新写盘")
+    fastNet.current.wifi["en0"] = true
+    try fastEngine.prepare()
     var order: [String] = []
     fastNet.onCutoff = { order.append("cutoff") }
     fastStore.onSave = { order.append("save") }
@@ -963,6 +1011,15 @@ func selfTest() throws {
     engine.enforce()
     try expect(net.current.upInterfaces.isEmpty && net.current.services["new"]?.enabled == false,
                "锁定期间关闭新网卡及被重新启用的服务")
+    let callsBefore = net.serviceCalls
+    engine.enforce()
+    try expect(net.serviceCalls == callsBefore, "服务均已关闭时不再锁定系统网络配置")
+    net.current.upInterfaces.insert("en3")
+    net.current.allInterfaces.insert("en3")
+    engine.lastFullEnforce = ProcessInfo.processInfo.systemUptime
+    engine.enforceTick()
+    try expect(net.current.upInterfaces.isEmpty && net.serviceCalls == callsBefore && store.value?.interfaces["en3"] == true,
+               "高频锁定循环先保存新网卡原状态再关闭，不读写网络服务配置")
     let restarted = GuardEngine(network: net, store: store)
     try expect(restarted.locked, "重启守护后仍保持锁定")
     try restarted.restore()
