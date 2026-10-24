@@ -1316,24 +1316,20 @@ enum GuardIndicator: CaseIterable {
         let tint = color
         let image = NSImage(size: NSSize(width: 20, height: 20), flipped: false) { _ in
             tint.setStroke()
-            let shield = NSBezierPath()
-            shield.move(to: NSPoint(x: 10, y: 18))
-            shield.line(to: NSPoint(x: 17, y: 15))
-            shield.line(to: NSPoint(x: 16, y: 8))
-            shield.curve(to: NSPoint(x: 10, y: 2), controlPoint1: NSPoint(x: 15, y: 5), controlPoint2: NSPoint(x: 12, y: 3))
-            shield.curve(to: NSPoint(x: 4, y: 8), controlPoint1: NSPoint(x: 8, y: 3), controlPoint2: NSPoint(x: 5, y: 5))
-            shield.line(to: NSPoint(x: 3, y: 15))
-            shield.close()
-            shield.lineWidth = 1.7
-            shield.lineJoinStyle = .round
-            shield.stroke()
+            // The app icon's power symbol: a long arc open at the top, plus the stem.
             let power = NSBezierPath()
-            power.appendArc(withCenter: NSPoint(x: 10, y: 10), radius: 3, startAngle: 135, endAngle: 45, clockwise: false)
-            power.move(to: NSPoint(x: 10, y: 14))
-            power.line(to: NSPoint(x: 10, y: 10.5))
-            power.lineWidth = 1.6
+            power.appendArc(withCenter: NSPoint(x: 10, y: 9.6), radius: 5.4, startAngle: 129, endAngle: 51, clockwise: false)
+            power.move(to: NSPoint(x: 10, y: 16.6))
+            power.line(to: NSPoint(x: 10, y: 10.4))
+            power.lineWidth = 1.8
             power.lineCapStyle = .round
             power.stroke()
+            // Two caution-tape slashes under it.
+            let tape = NSBezierPath()
+            tape.move(to: NSPoint(x: 2, y: 2)); tape.line(to: NSPoint(x: 5, y: 5))
+            tape.move(to: NSPoint(x: 15, y: 2)); tape.line(to: NSPoint(x: 18, y: 5))
+            tape.lineWidth = 1.4
+            tape.stroke()
             return true
         }
         // Template rendering follows light/dark menu bars while staying dimmed.
