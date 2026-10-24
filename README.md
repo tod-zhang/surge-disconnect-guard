@@ -2,7 +2,7 @@
 
 macOS 上的 Surge 网络保护工具。当 Surge 退出、被监控组件退出、增强模式或系统代理关闭，以及运行状态无法确认时，触发本机网络锁定，并提供手动恢复入口。
 
-[下载 v2.4.0 DMG](https://github.com/tod-zhang/surge-disconnect-guard/releases/tag/v2.4.0) · [使用说明](docs/usage.md) · [验证范围](docs/validation.md)
+[下载最新版 DMG](https://github.com/tod-zhang/surge-disconnect-guard/releases/latest) · [使用说明](docs/usage.md) · [验证范围](docs/validation.md)
 
 ![界面示例，运行于安全预览模式](docs/preview.png)
 
@@ -14,6 +14,7 @@ macOS 上的 Surge 网络保护工具。当 Surge 退出、被监控组件退出
 - 一次管理员授权安装本版本权限组件，之后同版开启、关闭、保存设置及查看诊断无需重复输入密码。
 - 无响应超时默认 **200 ms**，支持输入 **10～10000 ms** 的整数、保存及恢复默认。
 - 保存的超时在**下次开启守护时生效**，当前守护继续使用原值；配置重启后保留。
+- 应用内检查更新（设置 → 软件更新，或菜单栏“检查更新…”）：默认每天自动检查 GitHub Releases 并在后台下载，核对 SHA-256、代码签名、应用标识和版本号后，由你确认安装；守护运行时会先关闭并恢复网络，再替换应用并重新打开。
 - 异常后持续保持锁网，Surge 重新运行不会自动解除锁定。手动关闭守护时按备份恢复网络状态。
 
 本工具会主动断开网络，包括局域网连接。它是用户态响应工具，**不能保证零数据包泄漏或几毫秒内完成真实断网**。模式判断依赖 Surge 报告的状态，并不探测每条连接或代理节点的实际可用性。
@@ -30,6 +31,12 @@ macOS 上的 Surge 网络保护工具。当 Surge 退出、被监控组件退出
 “设置 → 无响应超时”可自定义毫秒数。明确返回模式关闭或收到进程退出事件时，不会等待该超时；首次连接最多等待 500 ms，查询之间间隔约 5 ms。
 
 开机启动**没有宽限期**：Surge 尚未就绪也会锁网。关闭守护后若保留开机启动选项，下次开机会重新开启。关闭窗口会收起到菜单栏；选择“退出界面”才会移除图标，已开启的后台守护仍继续运行。
+
+### 应用内更新（2.5.0 起）
+
+在“设置 → 软件更新”点击“检查更新”，或保持“自动检查并下载更新”开启。只接受本仓库 GitHub Actions 上传、带 SHA-256 摘要的 `SurgeDisconnectGuard-vX.Y.Z.dmg`。安装时如守护正在运行，会先关闭守护并恢复网络；新版启动后首次操作需重新授权一次，再点击“开启守护”。
+
+发布新版本时，同步修改 `gui/build-dmg.sh` 中的 `VERSION`、`BUILD_NUMBER` 和 `gui/Updater.swift` 中的 `fallbackAppVersion`，再推送 `vX.Y.Z` 标签；CI 会检查标签与版本一致。
 
 ### 从旧版升级到 2.4.0
 
@@ -50,7 +57,7 @@ python3 gui/test_permission_control.py
 
 # 构建原生应用和 DMG；构建过程中会运行引擎、GUI 和权限组件自检
 mkdir -p dist
-./gui/build-dmg.sh "$PWD/.build/release" "$PWD/dist/SurgeDisconnectGuard-2.4.0.dmg"
+./gui/build-dmg.sh "$PWD/.build/release" "$PWD/dist/SurgeDisconnectGuard-v2.5.0.dmg"
 ```
 
 构建和自检不安装后台、不改变网络。真实安装、开关守护和恢复网络请通过应用完成。
@@ -63,6 +70,7 @@ mkdir -p dist
 | `native.c` | 原生网卡控制、进程信息、受控子进程及退出事件接口 |
 | `GuardSettings.swift` | 超时范围校验、配置持久化及共享自检 |
 | `gui/GuardUI.swift` | SwiftUI / AppKit 界面、菜单栏及控制客户端 |
+| `gui/Updater.swift` | 检查 GitHub Releases、下载并校验 DMG、替换应用 |
 | `gui/ControlService.swift` | root 权限组件，核验用户身份、审计令牌及固定代码签名 |
 | `gui/ControlIPC.swift` | 私有本地控制协议，仅接受预设动作与经过校验的参数 |
 | `gui/control-actions.sh` | root 目录中的固定控制操作 |

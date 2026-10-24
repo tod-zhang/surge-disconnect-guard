@@ -4,13 +4,16 @@ GUI=$(cd -- "$(dirname -- "$0")" && pwd -P)
 BASE=$(cd -- "$GUI/.." && pwd -P)
 WORK=${1:?请传入中间构建目录的绝对路径}
 OUTPUT=${2:?请传入输出 DMG 的绝对路径}
+# App version; the detection engine and privileged helper keep their own version (2.4.0).
+VERSION=2.5.0
+BUILD_NUMBER=250
 APP="$WORK/Surge 断网守护.app"
 STAGE="$WORK/dmg-root"
 mkdir -p "$WORK" "$APP/Contents/MacOS" "$APP/Contents/Resources/engine" "$STAGE"
 xcrun clang -target arm64-apple-macosx13.0 -Wall -Wextra -Werror -c "$BASE/native.c" -o "$WORK/native.o"
 xcrun swiftc -parse-as-library -target arm64-apple-macosx13.0 -O -warnings-as-errors "$BASE/GuardSettings.swift" "$BASE/SurgeGuard.swift" "$WORK/native.o" -o "$WORK/surge-guard"
 "$WORK/surge-guard" self-test
-xcrun swiftc -parse-as-library -target arm64-apple-macosx13.0 -O -warnings-as-errors "$BASE/GuardSettings.swift" "$GUI/ControlIPC.swift" "$GUI/GuardUI.swift" -o "$APP/Contents/MacOS/SurgeGuardUI"
+xcrun swiftc -parse-as-library -target arm64-apple-macosx13.0 -O -warnings-as-errors "$BASE/GuardSettings.swift" "$GUI/ControlIPC.swift" "$GUI/GuardUI.swift" "$GUI/Updater.swift" -o "$APP/Contents/MacOS/SurgeGuardUI"
 "$APP/Contents/MacOS/SurgeGuardUI" --self-test
 install -m 755 "$WORK/surge-guard" "$APP/Contents/Resources/engine/surge-guard"
 install -m 755 "$WORK/surge-guard" "$BASE/surge-guard"
@@ -23,7 +26,7 @@ install -m 644 "$GUI/local.surgedisconnect.control.plist" "$APP/Contents/Resourc
 xcrun swiftc -parse-as-library -target arm64-apple-macosx13.0 -O -warnings-as-errors "$BASE/GuardSettings.swift" "$GUI/ControlIPC.swift" "$GUI/ControlService.swift" "$GUI/ControlSelfTest.swift" "$WORK/native.o" -o "$APP/Contents/Resources/engine/sg-control"
 codesign --force --sign - --identifier local.surgedisconnect.control "$APP/Contents/Resources/engine/sg-control"
 "$APP/Contents/Resources/engine/sg-control" self-test
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -32,8 +35,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleDisplayName</key><string>Surge 断网守护</string>
 <key>CFBundleExecutable</key><string>SurgeGuardUI</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>2.4.0</string>
-<key>CFBundleVersion</key><string>240</string>
+<key>CFBundleShortVersionString</key><string>$VERSION</string>
+<key>CFBundleVersion</key><string>$BUILD_NUMBER</string>
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
@@ -57,6 +60,6 @@ codesign --verify --deep --strict "$APP"
 ditto "$APP" "$STAGE/Surge 断网守护.app"
 [[ -L "$STAGE/Applications" ]] || ln -s /Applications "$STAGE/Applications"
 cp "$GUI/DMG安装说明.txt" "$STAGE/安装说明.txt"
-hdiutil create -volname 'Surge 断网守护 2.4.0' -fs HFS+ -srcfolder "$STAGE" -format UDZO -ov "$OUTPUT"
+hdiutil create -volname "Surge 断网守护 $VERSION" -fs HFS+ -srcfolder "$STAGE" -format UDZO -ov "$OUTPUT"
 hdiutil verify "$OUTPUT"
 echo "已生成：$OUTPUT"
