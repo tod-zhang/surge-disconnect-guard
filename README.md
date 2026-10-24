@@ -37,7 +37,7 @@ macOS 上的 Surge 网络保护工具。当 Surge 退出、被监控组件退出
 
 在“设置 → 软件更新”点击“检查更新”，或保持“自动检查并下载更新”开启。只接受本仓库 GitHub Actions 上传、带 SHA-256 摘要的 `SurgeDisconnectGuard-vX.Y.Z.dmg`。安装时如守护正在运行，会先关闭守护并恢复网络；新版启动后首次操作需重新授权一次，再点击“开启守护”。
 
-发布新版本时，同步修改 `gui/build-dmg.sh` 中的 `VERSION`、`BUILD_NUMBER` 和 `gui/Updater.swift` 中的 `fallbackAppVersion`，再推送 `vX.Y.Z` 标签；CI 会检查标签与版本一致。
+发布新版本时，同步修改 `gui/build-dmg.sh` 中的 `VERSION`、`BUILD_NUMBER` 和 `gui/Updater.swift` 中的 `fallbackAppVersion`，合并到 main 后 CI 会自动创建 `vX.Y.Z` 标签和 Release 并上传 DMG（该版本已发布过则只构建）；也可手动推送标签，CI 会检查标签与版本一致。
 
 ### 从旧版升级到 2.4.0
 
@@ -58,7 +58,7 @@ python3 gui/test_permission_control.py
 
 # 构建原生应用和 DMG；构建过程中会运行引擎、GUI 和权限组件自检
 mkdir -p dist
-./gui/build-dmg.sh "$PWD/.build/release" "$PWD/dist/SurgeDisconnectGuard-v2.6.0.dmg"
+./gui/build-dmg.sh "$PWD/.build/release" "$PWD/dist/SurgeDisconnectGuard-v2.6.1.dmg"
 ```
 
 构建和自检不安装后台、不改变网络。真实安装、开关守护和恢复网络请通过应用完成。
