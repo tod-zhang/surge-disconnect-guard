@@ -42,8 +42,19 @@ func runControlAction(_ request: ControlRequest, script: String = controlScript,
     guard [.enable, .disable, .boot, .diagnostics, .uninstall, .setTimeout].contains(request.action) else { throw ControlFailure("操作不被允许。") }
     if request.action == .setTimeout && request.timeoutMS == nil { throw ControlFailure("缺少超时参数。") }
     if request.timeoutMS != nil && ![.enable, .setTimeout].contains(request.action) { throw ControlFailure("此操作不接受超时参数。") }
-    var arguments = ["/bin/bash", script, request.action.rawValue, request.boot ? "on" : "off"]
+    var arguments = [request.action.rawValue, request.boot ? "on" : "off"]
     if let ms = request.timeoutMS { arguments.append(String(try GuardSettings(timeoutMS: ms).timeoutMS)) }
+    return try runFixedScript(arguments, script: script, timeoutSeconds: timeoutSeconds)
+}
+// Internal only: never reachable from a client request.
+func publishIdleStatus(script: String = controlScript) {
+    do {
+        let reply = try runFixedScript(["idle", "off"], script: script, timeoutSeconds: 20)
+        if !reply.success { fputs("无法发布空闲状态：\(reply.output)\n", stderr) }
+    } catch { fputs("无法发布空闲状态：\(error)\n", stderr) }
+}
+func runFixedScript(_ scriptArguments: [String], script: String, timeoutSeconds: Double) throws -> ControlReply {
+    let arguments = ["/bin/bash", script] + scriptArguments
     let pointers = arguments.map { strdup($0) }
     defer { pointers.forEach { free($0) } }
     let argv = pointers + [nil]
@@ -72,7 +83,7 @@ func runControlAction(_ request: ControlRequest, script: String = controlScript,
         if DispatchTime.now().uptimeNanoseconds >= deadline {
             kill(-pid, SIGKILL)
             while waitpid(pid, &status, 0) < 0 && errno == EINTR {}
-            throw ControlFailure("控制操作超过 120 秒，已停止操作；恢复备份会保留，请查看诊断。")
+            throw ControlFailure("控制操作超过 \(Int(timeoutSeconds)) 秒，已停止操作；恢复备份会保留，请查看诊断。")
         }
         usleep(10_000)
     }
@@ -155,7 +166,9 @@ func serveControl() throws {
                 let reply = try requestControl(ControlRequest(.uninstall, boot: false))
                 guard reply.success else { throw ControlFailure(reply.output) }
                 print(reply.output)
-            case "daemon": try serveControl()
+            case "daemon":
+                publishIdleStatus()
+                try serveControl()
             default: throw ControlFailure("无效的权限组件命令。")
             }
         } catch { fputs("\(error)\n", stderr); exit(1) }
