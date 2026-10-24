@@ -1,0 +1,91 @@
+#!/bin/bash
+set -euo pipefail
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export LC_ALL=C
+ROOT='/Library/Application Support/SurgeDisconnectGuard'
+LABEL='local.surgedisconnect.guard'
+PLIST="/Library/LaunchDaemons/$LABEL.plist"
+BIN="$ROOT/surge-guard"
+
+if [[ $(id -u) != 0 ]]; then
+    echo '请用 sudo 运行，或双击配套 .command 文件。' >&2
+    exit 1
+fi
+
+stop_guard() {
+    # Persist pause over reboots, then wait for the process to release its lock.
+    launchctl disable "system/$LABEL"
+    if launchctl print "system/$LABEL" >/dev/null 2>&1; then
+        launchctl bootout "system/$LABEL"
+    fi
+    if launchctl print "system/$LABEL" >/dev/null 2>&1; then
+        echo '守护仍在运行，已停止恢复操作。' >&2
+        exit 1
+    fi
+}
+
+case "${1:-status}" in
+    recover)
+        stop_guard
+        "$BIN" restore
+        echo '守护已暂停（重启后仍暂停）。需要保护时，请运行“重新启用守护.command”。'
+        ;;
+    enable)
+        if [[ -f "$ROOT/locked.json" ]] || { [[ -f "$ROOT/armed.json" ]] && ! launchctl print "system/$LABEL" >/dev/null 2>&1; }; then
+            echo '已有断网锁定。请先运行“恢复网络并暂停守护.command”，再启动 Surge，最后重新启用守护。' >&2
+            exit 1
+        fi
+        "$BIN" health-check
+        "$BIN" observer-check
+        "$BIN" persistent-check
+        launchctl enable "system/$LABEL"
+        if ! launchctl print "system/$LABEL" >/dev/null 2>&1; then
+            if [[ -f "$ROOT/daemon.plist" ]]; then
+                launchctl bootstrap system "$ROOT/daemon.plist"
+            else
+                launchctl bootstrap system "$PLIST"
+            fi
+        fi
+        launchctl print "system/$LABEL" | sed -n '1,22p'
+        echo '守护已启用；Surge 退出、增强模式或系统代理关闭/状态未知都会触发全机断网锁定。'
+        ;;
+    lock)
+        stop_guard
+        "$BIN" lock
+        launchctl enable "system/$LABEL"
+        launchctl bootstrap system "$PLIST"
+        echo '已手动触发断网，守护将持续保持锁定。'
+        ;;
+    status)
+        "$BIN" check
+        if [[ -f "$ROOT/locked.json" ]]; then
+            echo '断网状态：LOCKED（恢复前保留备份）'
+        else
+            echo '断网状态：无锁定备份'
+        fi
+        if [[ -f "$ROOT/armed.json" ]]; then
+            echo '恢复快照：已预备（守护中断后会按锁定处理，需手动恢复）'
+        fi
+        if launchctl print "system/$LABEL" >/dev/null 2>&1; then
+            launchctl print "system/$LABEL" | sed -n '1,22p'
+        else
+            echo '守护：未加载/已暂停'
+        fi
+        if [[ -f /var/log/surge-disconnect-guard.log ]]; then
+            tail -n 15 /var/log/surge-disconnect-guard.log
+        fi
+        ;;
+    uninstall)
+        stop_guard
+        "$BIN" restore
+        # If restore fails, set -e preserves the executable and backup for recovery.
+        rm -f "$PLIST"
+        rm -f "$ROOT/surge-guard" "$ROOT/sgctl" "$ROOT/operation.lock" "$ROOT/daemon.plist" "$ROOT/boot.enabled" "$ROOT/engine-version" "$ROOT/settings.json"
+        rmdir "$ROOT" || true
+        echo '已停止并卸载守护；已按备份恢复网络。日志保留在 /var/log/surge-disconnect-guard.log。'
+        ;;
+    *)
+        echo '用法：sudo /Library/Application\ Support/SurgeDisconnectGuard/sgctl {status|recover|enable|lock|uninstall}' >&2
+        exit 2
+        ;;
+esac

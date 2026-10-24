@@ -1,0 +1,20 @@
+# Local build products and runtime state
+.DS_Store
+.build/
+dist/
+work/
+outputs/
+__pycache__/
+*.py[cod]
+*.dmg
+*.zip
+*.app/
+*.o
+/surge-guard
+*.log
+locked.json
+armed.json
+settings.json
+control-client.json
+.env
+.env.*
