@@ -90,7 +90,7 @@ final class GuardModel: ObservableObject {
         }
         activeTimeoutMS = nil
         if let data = try? Data(contentsOf: statusURL), let status = try? JSONDecoder().decode(GuardStatus.self, from: data), installed {
-            engineOutdated = status.version != "2.3.0"
+            engineOutdated = status.version != "2.4.0"
             activeTimeoutMS = status.timeoutMS
             boot = status.boot
             UserDefaults.standard.set(boot, forKey: "bootPreference")
@@ -1106,7 +1106,7 @@ struct GuardView: View {
                 }
                 Spacer(minLength: 12)
                 Text("⌘1 守护 · ⌘2 设置 · ⌘3 诊断").font(.system(size: 10, weight: .medium)).foregroundColor(Zine.subtle)
-                Text(model.preview ? "SAFE PREVIEW" : "SURGE GUARD // 2.3.0")
+                Text(model.preview ? "SAFE PREVIEW" : "SURGE GUARD // 2.4.0")
                     .font(.system(size: 10, weight: .black)).italic().tracking(1)
                     .foregroundColor(stateColor).padding(.leading, 8)
             }.padding(.horizontal, 30).frame(height: 38)

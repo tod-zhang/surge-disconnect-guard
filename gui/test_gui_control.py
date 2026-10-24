@@ -168,7 +168,7 @@ esac
         self.call("disable")
         self.assertFalse((self.base / "loaded").exists())
         self.assertFalse((self.root / "armed.json").exists())
-        self.assertEqual((self.root / "engine-version").read_text().strip(), "2.3.0")
+        self.assertEqual((self.root / "engine-version").read_text().strip(), "2.4.0")
         self.assertEqual((self.root / "surge-guard").read_bytes(),
                          (self.engine / "surge-guard").read_bytes())
         self.assertTrue(self.boot.exists())

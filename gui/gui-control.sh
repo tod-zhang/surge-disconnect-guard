@@ -7,7 +7,7 @@ ROOT='/Library/Application Support/SurgeDisconnectGuard'
 LABEL='local.surgedisconnect.guard'
 BOOT="/Library/LaunchDaemons/$LABEL.plist"
 STATUS='/var/run/local.surgedisconnect.guard.status.json'
-VERSION='2.3.0'
+VERSION='2.4.0'
 ACTION=${1:-}
 PREFERENCE=${2:-on}
 

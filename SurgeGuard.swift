@@ -34,7 +34,7 @@ func publishStatus(_ phase: String, _ message: String, daemonPID: Int32 = 0, tim
     var value: [String: Any] = ["installed": true, "phase": phase, "message": message,
         "boot": fm.fileExists(atPath: stateDirectory + "/boot.enabled") ||
                 fm.fileExists(atPath: "/Library/LaunchDaemons/local.surgedisconnect.guard.plist"),
-        "updatedAt": Date().timeIntervalSince1970, "daemonPID": daemonPID, "version": "2.3.0"]
+        "updatedAt": Date().timeIntervalSince1970, "daemonPID": daemonPID, "version": "2.4.0"]
     if let timeoutMS = timeoutMS { value["timeoutMS"] = timeoutMS }
     do {
         let data = try JSONSerialization.data(withJSONObject: value)
@@ -760,7 +760,7 @@ func daemon() throws {
     }
     do { timeoutMS = try GuardSettings.load().timeoutMS }
     catch { gate.trigger("无法读取无响应超时设置：\(error)") }
-    log("START 2.3.0 持续连接；正常查询后间隔 5ms、单次查询超时 \(timeoutMS)ms；首次连接最多等待 500ms。")
+    log("START 2.4.0 持续连接；正常查询后间隔 5ms、单次查询超时 \(timeoutMS)ms；首次连接最多等待 500ms。")
     while true {
         if let trip = gate.trip, !engine.locked { engine.lock(trip.reason, fast: trip) }
         if engine.locked {
@@ -1091,7 +1091,7 @@ func latencyTest() throws {
         child.waitUntilExit()
     }
     samples.sort()
-    print("SurgeDisconnectGuard 2.3.0：50 次无害子进程退出事件测试")
+    print("SurgeDisconnectGuard 2.4.0：50 次无害子进程退出事件测试")
     print(String(format: "发出退出信号到模拟断网回调开始：P50 %.3f ms；P95 %.3f ms；最大 %.3f ms",
                  samples[24], samples[47], samples[49]))
     print("仅测本机当时负载下的事件响应；断网回调为空。未关闭任何网卡或 Surge，不能作为实际断网耗时或延迟上限。")
@@ -1184,7 +1184,7 @@ do {
         print("已保存无响应超时 \(settings.timeoutMS)ms；下次开启守护生效。当前守护未重启。")
     case "self-test": try selfTest()
     default:
-        print("SurgeDisconnectGuard 2.3.0 — daemon | check | health-check | persistent-check | self-test | latency-test | query-latency-test | observer-check | restore | lock | settings-set <ms>")
+        print("SurgeDisconnectGuard 2.4.0 — daemon | check | health-check | persistent-check | self-test | latency-test | query-latency-test | observer-check | restore | lock | settings-set <ms>")
     }
 } catch {
     fputs("错误：\(error)\n", stderr)

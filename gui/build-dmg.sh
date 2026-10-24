@@ -32,8 +32,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleDisplayName</key><string>Surge 断网守护</string>
 <key>CFBundleExecutable</key><string>SurgeGuardUI</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>2.3.0</string>
-<key>CFBundleVersion</key><string>230</string>
+<key>CFBundleShortVersionString</key><string>2.4.0</string>
+<key>CFBundleVersion</key><string>240</string>
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
@@ -57,6 +57,6 @@ codesign --verify --deep --strict "$APP"
 ditto "$APP" "$STAGE/Surge 断网守护.app"
 [[ -L "$STAGE/Applications" ]] || ln -s /Applications "$STAGE/Applications"
 cp "$GUI/DMG安装说明.txt" "$STAGE/安装说明.txt"
-hdiutil create -volname 'Surge 断网守护 2.3.0' -fs HFS+ -srcfolder "$STAGE" -format UDZO -ov "$OUTPUT"
+hdiutil create -volname 'Surge 断网守护 2.4.0' -fs HFS+ -srcfolder "$STAGE" -format UDZO -ov "$OUTPUT"
 hdiutil verify "$OUTPUT"
 echo "已生成：$OUTPUT"
