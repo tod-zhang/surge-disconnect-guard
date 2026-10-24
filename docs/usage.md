@@ -36,4 +36,4 @@ sudo '/Library/Application Support/SurgeDisconnectGuard/sgctl' recover
 - 超时私有配置：安装目录中的 `settings.json`
 - 界面只读配置副本：`/var/run/local.surgedisconnect.settings.json`
 
-开机启动选项控制检测引擎；权限组件保留以接收控制操作，并不会因为自己启动而开启守护。登录后如需菜单栏图标，请打开应用。
+开机启动选项控制检测引擎；权限组件保留以接收控制操作，并不会因为自己启动而开启守护。如需登录后自动出现菜单栏图标并接收断网提醒，请在“设置 → 断网提醒”中开启“登录时打开（仅菜单栏）”。
