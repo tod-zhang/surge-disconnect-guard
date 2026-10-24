@@ -557,6 +557,7 @@ struct GuardView: View {
             }
             .contentShape(Capsule())
         }.buttonStyle(.plain)
+            .focusable(false)
             .keyboardShortcut(item.shortcut, modifiers: .command)
             .help(hint)
             .onHover { inside in hoveredTab = inside ? item : (hoveredTab == item ? nil : hoveredTab) }
@@ -565,7 +566,7 @@ struct GuardView: View {
     }
     private func tabDot(_ item: GuardPage) -> Color {
         switch item {
-        case .overview: return model.color
+        case .overview: return indicator == .inactive ? Color(white: 0.55) : model.color
         case .settings: return GuardPalette.gold
         case .diagnostics: return GuardPalette.blue
         }
