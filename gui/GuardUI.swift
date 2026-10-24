@@ -478,6 +478,47 @@ private struct Starfield: View {
     }
 }
 
+/// Small status dot drawn like the planet: flat fill, inked edge and a glossy highlight.
+private struct CelDot: View {
+    var color: Color
+    var size: CGFloat = 8
+    var body: some View {
+        Circle().fill(color)
+            .overlay(Circle().fill(Color.white.opacity(0.9)).frame(width: size * 0.3, height: size * 0.3)
+                .offset(x: -size * 0.16, y: -size * 0.16))
+            .overlay(Circle().strokeBorder(Color.black.opacity(0.55), lineWidth: 1))
+            .frame(width: size, height: size)
+            .accessibilityHidden(true)
+    }
+}
+
+/// A handful of four-point sparkles, matching the planet's, that twinkle slowly over the starfield.
+private struct Twinkles: View {
+    var animated: Bool
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 20, paused: !animated)) { timeline in
+            Canvas { context, size in
+                let time = timeline.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 3600)
+                let spots: [(CGFloat, CGFloat, CGFloat, Double)] = [(0.08, 0.20, 5, 0), (0.92, 0.30, 6, 1.7), (0.17, 0.62, 4, 3.1),
+                                                                    (0.86, 0.70, 5, 4.4), (0.30, 0.10, 3, 2.2), (0.70, 0.14, 4, 5.3),
+                                                                    (0.05, 0.88, 3, 0.9), (0.96, 0.92, 4, 3.8)]
+                for spot in spots {
+                    let twinkle = 0.5 + 0.5 * sin(time * 1.3 + spot.3)
+                    let center = CGPoint(x: spot.0 * size.width, y: spot.1 * size.height)
+                    let r = spot.2 * CGFloat(0.5 + 0.5 * twinkle)
+                    var path = Path()
+                    path.move(to: CGPoint(x: center.x, y: center.y - r))
+                    path.addQuadCurve(to: CGPoint(x: center.x + r, y: center.y), control: center)
+                    path.addQuadCurve(to: CGPoint(x: center.x, y: center.y + r), control: center)
+                    path.addQuadCurve(to: CGPoint(x: center.x - r, y: center.y), control: center)
+                    path.addQuadCurve(to: CGPoint(x: center.x, y: center.y - r), control: center)
+                    context.fill(path, with: .color(Color.white.opacity(0.15 + 0.55 * twinkle)))
+                }
+            }
+        }.allowsHitTesting(false).accessibilityHidden(true)
+    }
+}
+
 private struct WindowMaterial: NSViewRepresentable {
     func makeNSView(context: Context) -> NSVisualEffectView {
         let view = NSVisualEffectView()
@@ -504,22 +545,33 @@ private struct GlassPanel: ViewModifier {
 private struct PillButton: ButtonStyle {
     var prominent = false
     var tint: Color = .white
+    /// Optional state colour: a hard, sticker-like drop edge on prominent buttons, a tinted outline otherwise.
+    var edge: Color?
     func makeBody(configuration: Configuration) -> some View {
-        PillBody(configuration: configuration, prominent: prominent, tint: tint)
+        PillBody(configuration: configuration, prominent: prominent, tint: tint, edge: edge)
     }
     private struct PillBody: View {
         let configuration: ButtonStyleConfiguration
         let prominent: Bool
         let tint: Color
+        let edge: Color?
         @State private var hovering = false
         @Environment(\.isEnabled) private var isEnabled
         var body: some View {
+            let drop: CGFloat = configuration.isPressed ? 1 : (hovering && isEnabled ? 4 : 3)
+            let outline: Color = prominent ? Color.clear : (edge?.opacity(hovering ? 0.75 : 0.45) ?? Color.white.opacity(0.10))
             configuration.label
                 .font(.system(size: 13, weight: .semibold))
                 .padding(.horizontal, 20).frame(height: 40)
                 .foregroundStyle(prominent ? Color.black.opacity(0.86) : Color.white.opacity(0.88))
                 .background(Capsule().fill(prominent ? tint : Color.white.opacity(configuration.isPressed ? 0.14 : hovering ? 0.10 : 0.065)))
-                .overlay(Capsule().strokeBorder(Color.white.opacity(prominent ? 0 : 0.10), lineWidth: 1))
+                .background {
+                    if prominent, let edge = edge {
+                        Capsule().fill(edge).offset(y: drop)
+                    }
+                }
+                .overlay(Capsule().strokeBorder(outline, lineWidth: edge == nil ? 1 : 1.5))
+                .offset(y: prominent && edge != nil && configuration.isPressed ? 2 : 0)
                 .shadow(color: prominent ? tint.opacity(hovering ? 0.30 : 0.14) : Color.clear, radius: hovering ? 18 : 10, y: 4)
                 .contentShape(Capsule())
                 .scaleEffect(configuration.isPressed ? 0.97 : (hovering && isEnabled ? 1.02 : 1))
@@ -561,9 +613,8 @@ struct GuardView: View {
     init(model: GuardModel = GuardModel()) { _model = StateObject(wrappedValue: model) }
 
     private var indicator: GuardIndicator { GuardIndicator(phase: model.phase) }
-    private var accent: Color {
-        ["disabled", "uninstalled"].contains(model.phase) ? GuardPalette.mint : model.color
-    }
+    private var planet: PlanetStyle { PlanetStyle(indicator) }
+    private var accent: Color { planet.glow }
     private var summary: String {
         switch model.phase {
         case "protecting": return "增强模式与系统代理均已确认。Surge 退出或状态异常时，自动锁定本机网络。"
@@ -587,6 +638,7 @@ struct GuardView: View {
                 .animation(reduceMotion ? nil : .easeInOut(duration: 0.6), value: model.phase)
                 .animation(reduceMotion ? nil : .easeInOut(duration: 0.3), value: page)
             Starfield().ignoresSafeArea()
+            Twinkles(animated: !reduceMotion).ignoresSafeArea()
             VStack(spacing: 0) {
                 navigation.frame(height: 78)
                 Group {
@@ -631,8 +683,8 @@ struct GuardView: View {
         let hint: String = "\(item.rawValue)（⌘\(String(item.shortcut.character))）"
         return Button { go(item) } label: {
             HStack(spacing: 7) {
-                Circle().fill(tabDot(item)).frame(width: 6, height: 6)
-                    .opacity(page == item ? 1 : 0.7)
+                CelDot(color: tabDot(item), size: 7)
+                    .opacity(page == item ? 1 : 0.8)
                 Text(item.rawValue).font(.system(size: 13, weight: .semibold))
             }
             .frame(width: 92, height: 34)
@@ -657,7 +709,7 @@ struct GuardView: View {
     }
     private func tabDot(_ item: GuardPage) -> Color {
         switch item {
-        case .overview: return indicator == .inactive ? Color(white: 0.55) : model.color
+        case .overview: return planet.base
         case .settings: return GuardPalette.gold
         case .diagnostics: return GuardPalette.blue
         }
@@ -668,9 +720,9 @@ struct GuardView: View {
             PlanetView(indicator: indicator, animated: !reduceMotion)
                 .frame(width: 420, height: 228)
                 .id(indicator)
-                .transition(.opacity)
+                .transition(reduceMotion ? AnyTransition.opacity : AnyTransition.scale(scale: 0.9).combined(with: .opacity))
             HStack(spacing: 7) {
-                Circle().fill(model.color).frame(width: 6, height: 6)
+                CelDot(color: planet.base, size: 7)
                 Text("网络保护").font(.system(size: 11, weight: .semibold)).tracking(1.5)
                     .foregroundStyle(GuardPalette.secondary)
                 if model.busy { ProgressView().controlSize(.mini).tint(accent) }
@@ -686,17 +738,17 @@ struct GuardView: View {
                     Image(systemName: model.primaryAction == "enable" ? "power" : "network")
                     Text(model.primaryTitle)
                 }.frame(minWidth: 168)
-            }.buttonStyle(PillButton(prominent: model.primaryAction == "enable"))
+            }.buttonStyle(PillButton(prominent: model.primaryAction == "enable", edge: planet.shadow))
                 .disabled(model.busy)
                 .padding(.top, 22)
                 .accessibilityIdentifier(model.primaryAction == "enable" ? "enableGuard" : "disableGuard")
             Spacer(minLength: 16)
             HStack(spacing: 10) {
-                modeChip("增强模式", tint: GuardPalette.mint)
-                modeChip("系统代理", tint: GuardPalette.blue)
+                modeChip("增强模式", tint: planet.base)
+                modeChip("系统代理", tint: planet.base)
                 Button { go(.settings) } label: {
                     HStack(spacing: 8) {
-                        Circle().fill(model.boot ? GuardPalette.gold : Color.white.opacity(0.25)).frame(width: 7, height: 7)
+                        CelDot(color: model.boot ? GuardPalette.gold : Color.white.opacity(0.25))
                         Text("开机守护").foregroundStyle(GuardPalette.secondary)
                         Text(model.boot ? "已开启" : "未开启").fontWeight(.semibold)
                         Image(systemName: "chevron.right").font(.system(size: 9, weight: .bold))
@@ -723,8 +775,8 @@ struct GuardView: View {
         let confirmed = model.phase == "protecting"
         let hint = confirmed ? "Surge 已确认" : (["disabled", "uninstalled"].contains(model.phase) ? "开启守护后持续检查" : "当前状态无法确认")
         return HStack(spacing: 8) {
-            Circle().fill(confirmed ? tint : Color.white.opacity(0.25)).frame(width: 7, height: 7)
-                .shadow(color: confirmed ? tint.opacity(0.8) : Color.clear, radius: 4)
+            CelDot(color: confirmed ? tint : Color.white.opacity(0.25))
+                .shadow(color: confirmed ? tint.opacity(0.7) : Color.clear, radius: 4)
             Text(title).foregroundStyle(GuardPalette.secondary)
             Text(confirmed ? "已开启" : "待确认").fontWeight(.semibold)
         }.font(.system(size: 12)).padding(.horizontal, 14).frame(height: 34)
