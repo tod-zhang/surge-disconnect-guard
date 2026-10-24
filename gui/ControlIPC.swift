@@ -2,7 +2,7 @@ import Foundation
 import Darwin
 import Security
 
-let controlVersion = "2.3.0"
+let controlVersion = "2.4.0"
 let controlSocket = "/var/run/local.surgedisconnect.control.sock"
 let controlRoot = "/Library/Application Support/SurgeDisconnectGuard"
 let controlLabel = "local.surgedisconnect.control"

@@ -2,7 +2,7 @@
 
 macOS 上的 Surge 网络保护工具。当 Surge 退出、被监控组件退出、增强模式或系统代理关闭，以及运行状态无法确认时，触发本机网络锁定，并提供手动恢复入口。
 
-[下载 v2.3.0 DMG](https://github.com/tod-zhang/surge-disconnect-guard/releases/tag/v2.3.0) · [使用说明](docs/usage.md) · [验证范围](docs/validation.md)
+[下载 v2.4.0 DMG](https://github.com/tod-zhang/surge-disconnect-guard/releases/tag/v2.4.0) · [使用说明](docs/usage.md) · [验证范围](docs/validation.md)
 
 ![界面示例，运行于安全预览模式](docs/preview.png)
 
@@ -31,7 +31,7 @@ macOS 上的 Surge 网络保护工具。当 Surge 退出、被监控组件退出
 
 开机启动**没有宽限期**：Surge 尚未就绪也会锁网。关闭守护后若保留开机启动选项，下次开机会重新开启。关闭窗口会收起到菜单栏；选择“退出界面”才会移除图标，已开启的后台守护仍继续运行。
 
-### 从旧版升级到 2.3.0
+### 从旧版升级到 2.4.0
 
 先在旧版点击“关闭并恢复网络”，退出旧界面，再替换应用并重新开启。该版本更新后台引擎和权限组件，首次控制操作需重新授权一次，之后同版继续免密。
 
@@ -50,7 +50,7 @@ python3 gui/test_permission_control.py
 
 # 构建原生应用和 DMG；构建过程中会运行引擎、GUI 和权限组件自检
 mkdir -p dist
-./gui/build-dmg.sh "$PWD/.build/release" "$PWD/dist/SurgeDisconnectGuard-2.3.0.dmg"
+./gui/build-dmg.sh "$PWD/.build/release" "$PWD/dist/SurgeDisconnectGuard-2.4.0.dmg"
 ```
 
 构建和自检不安装后台、不改变网络。真实安装、开关守护和恢复网络请通过应用完成。

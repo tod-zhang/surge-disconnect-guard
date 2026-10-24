@@ -1,0 +1,47 @@
+name: Build DMG
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run control-flow tests
+        run: |
+          python3 test_controller.py
+          python3 gui/test_gui_control.py
+          python3 gui/test_permission_control.py
+
+      - name: Build and self-test the app and DMG
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then label="$GITHUB_REF_NAME"; else label="$(git rev-parse --short HEAD)"; fi
+          echo "DMG_NAME=SurgeDisconnectGuard-$label.dmg" >> "$GITHUB_ENV"
+          mkdir -p dist
+          ./gui/build-dmg.sh "$RUNNER_TEMP/build" "$PWD/dist/SurgeDisconnectGuard-$label.dmg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.DMG_NAME }}
+          path: dist/${{ env.DMG_NAME }}
+          if-no-files-found: error
+
+      - name: Attach DMG to the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "dist/$DMG_NAME" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "dist/$DMG_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+          fi
