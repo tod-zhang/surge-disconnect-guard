@@ -895,6 +895,13 @@ func selfTest() throws {
         try expect(rejected, "持续连接失去响应会按指定阈值超时")
     }
     do {
+        // Launch /bin/sleep once untimed: its first launch on a fresh machine (e.g. a CI runner) can take
+        // longer than the whole 200ms budget, which would test process startup rather than the threshold.
+        let warmup = Process()
+        warmup.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        warmup.arguments = ["0"]
+        try warmup.run()
+        warmup.waitUntilExit()
         let simulated = try PersistentFeatures(uid: Int32(geteuid()), cancel: { false }, testCommand:
             ("/bin/sh", ["-c", "printf 'ready\\n> '; while IFS= read -r command; do /bin/sleep 0.1; printf 'enhanced-mode: On\\nsystem-proxy: On\\n> '; done"]))
         try simulated.query()
