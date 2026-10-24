@@ -73,7 +73,7 @@ NSGraphicsContext.restoreGraphicsState()
 
 // Power symbol: the long arc around the bottom from (380, 330) to (644, 330), plus the stem.
 let power = NSBezierPath()
-let center = NSPoint(x: 512, y: 330 + (210 * 210 - 132 * 132).squareRoot())
+let center = NSPoint(x: 512, y: 330 + CGFloat(210 * 210 - 132 * 132).squareRoot())
 let startAngle = atan2(330 - center.y, 380 - center.x)
 let sweep = 2 * CGFloat.pi - (atan2(330 - center.y, 644 - center.x) - startAngle).magnitude
 for step in 0...240 {
