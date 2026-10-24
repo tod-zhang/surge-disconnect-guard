@@ -448,8 +448,10 @@ private struct CautionTape: View {
     }
 }
 
-/// Each protection state is a comic-print planet: flat ink-outlined colour with halftone shading,
-/// misregistered print ghosts, a caution-tape ring that keeps running, a sticker label and a glitch flicker.
+/// Each protection state is shown by an original TV-head mascot in sticker style: an inked body with a hard
+/// shadow and misregistered print ghosts, a scanline screen whose face follows the state, wobbling antennae
+/// and a gentle bob. Acid and smiling while guarding, hot pink behind warning stripes when locked,
+/// amber with static while unconfirmed, grey with the screen off when idle.
 private struct PlanetStyle {
     var base: Color
     var band: Color
@@ -460,20 +462,21 @@ private struct PlanetStyle {
     var label: String
     var ghost: Double
     var speed: Double
+    var face: Color
     init(_ indicator: GuardIndicator) {
         switch indicator {
         case .protecting:
             base = Zine.acid; band = Zine.rgb(0x9BE000); shade = Zine.rgb(0x1D6B3A); ring = Zine.acid
-            tag = Zine.hot; tagText = Color.white; label = "SAFE!"; ghost = 1; speed = 1
+            tag = Zine.hot; tagText = Color.white; label = "SAFE!"; ghost = 1; speed = 1; face = Zine.cyan
         case .locked:
             base = Zine.hot; band = Zine.rgb(0xD81B60); shade = Zine.rgb(0x5A0B2A); ring = Zine.amber
-            tag = Zine.acid; tagText = Zine.ink; label = "LOCKED"; ghost = 1; speed = 0.8
+            tag = Zine.acid; tagText = Zine.ink; label = "LOCKED"; ghost = 1; speed = 0.8; face = Zine.acid
         case .attention:
             base = Zine.amber; band = Zine.rgb(0xF08A00); shade = Zine.rgb(0x6B3A00); ring = Zine.acid
-            tag = Zine.cyan; tagText = Zine.ink; label = "CHECK?"; ghost = 1; speed = 1.2
+            tag = Zine.cyan; tagText = Zine.ink; label = "CHECK?"; ghost = 1; speed = 1.2; face = Zine.cyan
         case .inactive:
             base = Zine.rgb(0xA8A8B3); band = Zine.rgb(0x85858F); shade = Zine.rgb(0x3A3A42); ring = Zine.rgb(0xD0D0D6)
-            tag = Zine.rgb(0x2A2A30); tagText = Color.white; label = "OFF"; ghost = 0.4; speed = 0.5
+            tag = Zine.rgb(0x2A2A30); tagText = Color.white; label = "OFF"; ghost = 0.4; speed = 0.5; face = Zine.rgb(0x6B6B76)
         }
     }
     var english: String {
@@ -493,7 +496,7 @@ private struct PlanetView: View {
         let style = PlanetStyle(indicator)
         TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !animated)) { timeline in
             Canvas { context, size in
-                PlanetView.draw(in: &context, size: size, style: style, glitch: indicator != .inactive,
+                PlanetView.draw(in: &context, size: size, style: style, indicator: indicator,
                                 time: timeline.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 3600))
             }
         }.accessibilityHidden(true)
@@ -501,82 +504,6 @@ private struct PlanetView: View {
 
     private static func circle(_ center: CGPoint, _ r: CGFloat) -> Path {
         Path(ellipseIn: CGRect(x: center.x - r, y: center.y - r, width: r * 2, height: r * 2))
-    }
-
-    private static func ringArc(center: CGPoint, radius: CGFloat, front: Bool) -> Path {
-        var path = Path()
-        let steps = 72
-        let start: Double = front ? 0 : Double.pi
-        let rotation = CGAffineTransform(rotationAngle: -0.28)
-        for step in 0...steps {
-            let angle = start + Double.pi * Double(step) / Double(steps)
-            let raw = CGPoint(x: radius * 1.72 * CGFloat(cos(angle)), y: radius * 0.42 * CGFloat(sin(angle))).applying(rotation)
-            let point = CGPoint(x: raw.x + center.x, y: raw.y + center.y)
-            if step == 0 { path.move(to: point) } else { path.addLine(to: point) }
-        }
-        return path
-    }
-
-    private static func drawRing(in context: inout GraphicsContext, center: CGPoint, radius: CGFloat, style: PlanetStyle,
-                                 time: Double, front: Bool) {
-        let band = radius * 0.27
-        let arc = ringArc(center: center, radius: radius, front: front)
-        let shift = radius * 0.06
-        context.stroke(arc.applying(CGAffineTransform(translationX: shift, y: shift)), with: .color(Zine.hot),
-                       style: StrokeStyle(lineWidth: band, lineCap: .butt))
-        context.stroke(arc, with: .color(Zine.ink), style: StrokeStyle(lineWidth: band, lineCap: .butt))
-        let phase = CGFloat(time * 0.6).truncatingRemainder(dividingBy: 1) * radius * 0.46
-        context.stroke(arc, with: .color(style.ring),
-                       style: StrokeStyle(lineWidth: band * 0.62, lineCap: .butt, dash: [radius * 0.24, radius * 0.22], dashPhase: -phase))
-    }
-
-    private static func drawSurface(in context: inout GraphicsContext, center: CGPoint, radius: CGFloat, style: PlanetStyle, time: Double) {
-        let body = circle(center, radius)
-        context.drawLayer { layer in
-            layer.clip(to: body)
-            layer.fill(body, with: .color(style.base))
-            // Graphic bands scroll diagonally across the surface.
-            layer.drawLayer { bands in
-                bands.translateBy(x: center.x, y: center.y)
-                bands.rotate(by: .radians(-0.28))
-                let span = radius * 3.2
-                let offset = (CGFloat(time) * radius * 0.22).truncatingRemainder(dividingBy: span)
-                let specs: [(CGFloat, CGFloat, CGFloat, CGFloat)] = [(-0.66, 0.18, 1.4, 0), (-0.18, 0.30, 1.9, 1.1), (0.36, 0.17, 1.3, 2.2)]
-                for spec in specs {
-                    for wrap in -1...1 {
-                        let start: CGFloat = (spec.3 * radius + offset).truncatingRemainder(dividingBy: span)
-                        let x: CGFloat = -radius * 1.6 + start + CGFloat(wrap) * span
-                        let rect = CGRect(x: x, y: spec.0 * radius, width: spec.2 * radius, height: spec.1 * radius)
-                        bands.fill(Path(roundedRect: rect, cornerRadius: spec.1 * radius / 2), with: .color(style.band))
-                    }
-                }
-            }
-            // Hard terminator filled with the shade colour and a halftone that thickens away from the light.
-            var shadow = body
-            let light = CGPoint(x: center.x - radius * 0.32, y: center.y - radius * 0.30)
-            shadow.addPath(circle(light, radius * 1.02))
-            layer.drawLayer { dark in
-                dark.clip(to: shadow, style: FillStyle(eoFill: true))
-                dark.fill(body, with: .color(style.shade))
-                let step = radius * 0.075
-                var dots = Path()
-                var y = center.y - radius
-                var row = 0
-                while y < center.y + radius {
-                    var x = center.x - radius + (row % 2 == 0 ? 0 : step / 2)
-                    while x < center.x + radius {
-                        let depth = hypot(x - light.x, y - light.y) - radius * 1.02
-                        let ratio: CGFloat = (depth + radius * 0.5) / (radius * 0.35)
-                        let size: CGFloat = min(1, max(0, ratio)) * step * 0.42
-                        if size > 0.2 { dots.addEllipse(in: CGRect(x: x - size, y: y - size, width: size * 2, height: size * 2)) }
-                        x += step
-                    }
-                    y += step
-                    row += 1
-                }
-                dark.fill(dots, with: .color(Zine.ink.opacity(0.85)))
-            }
-        }
     }
 
     private static func spark(_ center: CGPoint, _ size: CGFloat) -> Path {
@@ -591,72 +518,218 @@ private struct PlanetView: View {
         return path
     }
 
-    private static func draw(in context: inout GraphicsContext, size: CGSize, style: PlanetStyle, glitch: Bool, time: Double) {
-        let radius = min(size.width, size.height) * 0.30
-        let t = time * style.speed
-        let center = CGPoint(x: size.width / 2, y: size.height / 2 + CGFloat(sin(time * 1.4)) * radius * 0.03)
-        let line = max(1.5, radius * 0.075)
+    private static func draw(in context: inout GraphicsContext, size: CGSize, style: PlanetStyle, indicator: GuardIndicator, time: Double) {
+        let unit: CGFloat = min(size.width / 1.5, size.height)
+        let detailed = unit > 80
+        let bodyH: CGFloat = unit * 0.56
+        let bodyW: CGFloat = bodyH * 1.38
+        let bob: CGFloat = CGFloat(sin(time * 2.6 * style.speed)) * unit * 0.018
+        let center = CGPoint(x: size.width / 2, y: size.height / 2 + unit * 0.09 + bob)
+        let bodyRect = CGRect(x: center.x - bodyW / 2, y: center.y - bodyH / 2, width: bodyW, height: bodyH)
+        let line: CGFloat = max(1.5, unit * 0.02)
+        let shell = Path(roundedRect: bodyRect, cornerRadius: bodyH * 0.2)
 
-        // Misregistered print ghosts.
-        let wobble = CGFloat(sin(time * 3.1)) * radius * 0.015
-        context.fill(circle(CGPoint(x: center.x - radius * 0.07 - wobble, y: center.y - radius * 0.04), radius),
-                     with: .color(Zine.cyan.opacity(0.9 * style.ghost)))
-        context.fill(circle(CGPoint(x: center.x + radius * 0.08 + wobble, y: center.y + radius * 0.07), radius),
-                     with: .color(Zine.hot.opacity(0.9 * style.ghost)))
+        // Antennae, wobbling out of phase.
+        for side in [-1.0, 1.0] {
+            let sway: CGFloat = CGFloat(sin(time * 3.4 * style.speed + side * 1.3)) * unit * 0.025
+            let base = CGPoint(x: center.x + CGFloat(side) * bodyW * 0.1, y: bodyRect.minY + line)
+            let tip = CGPoint(x: center.x + CGFloat(side) * bodyW * 0.3 + sway, y: bodyRect.minY - bodyH * 0.42)
+            var stalk = Path()
+            stalk.move(to: base)
+            stalk.addLine(to: tip)
+            context.stroke(stalk, with: .color(Zine.ink), style: StrokeStyle(lineWidth: line * 1.3, lineCap: .round))
+            let knob = circle(tip, max(2, unit * 0.03))
+            context.fill(knob, with: .color(side < 0 ? Zine.hot : Zine.cyan))
+            context.stroke(knob, with: .color(Zine.ink), lineWidth: line * 0.8)
+        }
 
-        drawRing(in: &context, center: center, radius: radius, style: style, time: t, front: false)
-        drawSurface(in: &context, center: center, radius: radius, style: style, time: t)
+        // Stubby feet.
+        for side in [-1.0, 1.0] {
+            let foot = Path(roundedRect: CGRect(x: center.x + CGFloat(side) * bodyW * 0.26 - bodyW * 0.08, y: bodyRect.maxY - line,
+                                                width: bodyW * 0.16, height: bodyH * 0.13), cornerRadius: bodyH * 0.04)
+            context.fill(foot, with: .color(Zine.ink))
+        }
 
-        // A short glitch every few seconds: one horizontal slice of the surface jumps sideways.
-        let cycle = time.truncatingRemainder(dividingBy: 3.4)
-        if glitch && cycle < 0.16 {
-            let slice = CGRect(x: center.x - radius * 1.2, y: center.y + radius * 0.08, width: radius * 2.4, height: radius * 0.16)
-            context.drawLayer { layer in
-                layer.clip(to: Path(slice))
-                layer.translateBy(x: radius * (cycle < 0.08 ? 0.12 : -0.08), y: 0)
-                PlanetView.drawSurface(in: &layer, center: center, radius: radius, style: style, time: t)
+        // Misregistered print ghosts and the sticker shadow.
+        let wobble: CGFloat = CGFloat(sin(time * 3.1)) * unit * 0.004
+        context.fill(shell.offsetBy(dx: -unit * 0.022 - wobble, dy: -unit * 0.012), with: .color(Zine.cyan.opacity(0.85 * style.ghost)))
+        context.fill(shell.offsetBy(dx: unit * 0.024 + wobble, dy: unit * 0.02), with: .color(Zine.hot.opacity(0.85 * style.ghost)))
+        context.fill(shell.offsetBy(dx: unit * 0.03, dy: unit * 0.035), with: .color(Zine.ink))
+        context.fill(shell, with: .color(style.base))
+        // A flat lighter panel band across the top of the cabinet.
+        context.drawLayer { layer in
+            layer.clip(to: shell)
+            layer.fill(Path(CGRect(x: bodyRect.minX, y: bodyRect.minY, width: bodyW, height: bodyH * 0.1)), with: .color(Color.white.opacity(0.35)))
+        }
+        context.stroke(shell, with: .color(Zine.ink), lineWidth: line * 1.2)
+
+        let screenRect = CGRect(x: bodyRect.minX + bodyW * 0.08, y: bodyRect.minY + bodyH * 0.14,
+                                width: bodyW * 0.7, height: bodyH * 0.72)
+        let glass = Path(roundedRect: screenRect, cornerRadius: bodyH * 0.12)
+        context.fill(glass, with: .color(Zine.rgb(0x07100F)))
+        drawScreen(in: &context, glass: glass, rect: screenRect, style: style, indicator: indicator, time: time, line: line)
+        context.stroke(glass, with: .color(Zine.ink), lineWidth: line)
+
+        // Knobs and a speaker grille on the right.
+        let panelX: CGFloat = screenRect.maxX + (bodyRect.maxX - screenRect.maxX) / 2
+        for index in 0..<2 {
+            let knob = circle(CGPoint(x: panelX, y: screenRect.minY + screenRect.height * (0.2 + CGFloat(index) * 0.3)), bodyH * 0.075)
+            context.fill(knob, with: .color(index == 0 ? Zine.hot : Zine.ink))
+            context.stroke(knob, with: .color(Zine.ink), lineWidth: line * 0.8)
+        }
+        if detailed {
+            for index in 0..<3 {
+                let y = screenRect.minY + screenRect.height * (0.72 + CGFloat(index) * 0.1)
+                context.fill(Path(CGRect(x: panelX - bodyH * 0.08, y: y, width: bodyH * 0.16, height: line * 0.8)), with: .color(Zine.ink))
             }
         }
 
-        let body = circle(center, radius)
-        context.stroke(body, with: .color(Zine.ink), lineWidth: line)
-
-        // Blocky comic highlights.
-        context.drawLayer { layer in
-            layer.translateBy(x: center.x - radius * 0.46, y: center.y - radius * 0.50)
-            layer.rotate(by: .radians(-0.7))
-            let gloss = Path(CGRect(x: -radius * 0.2, y: -radius * 0.07, width: radius * 0.4, height: radius * 0.14))
-            layer.fill(gloss, with: .color(Color.white))
-            layer.stroke(gloss, with: .color(Zine.ink), lineWidth: max(1, line * 0.45))
-        }
-        let pip = Path(CGRect(x: center.x - radius * 0.14, y: center.y - radius * 0.78, width: radius * 0.1, height: radius * 0.1))
-        context.fill(pip, with: .color(Color.white))
-        context.stroke(pip, with: .color(Zine.ink), lineWidth: max(1, line * 0.4))
-
-        drawRing(in: &context, center: center, radius: radius, style: style, time: t, front: true)
+        guard detailed else { return }
 
         // Sticker label, wobbling slightly.
-        if radius > 30 {
-            context.drawLayer { layer in
-                layer.translateBy(x: center.x + radius * 0.98, y: center.y - radius * 0.98)
-                layer.rotate(by: .degrees(10 + 3 * sin(time * 2)))
-                let tag = Path(CGRect(x: -radius * 0.46, y: -radius * 0.16, width: radius * 0.92, height: radius * 0.32))
-                layer.fill(tag.applying(CGAffineTransform(translationX: 3, y: 3)), with: .color(Zine.ink))
-                layer.fill(tag, with: .color(style.tag))
-                layer.stroke(tag, with: .color(Zine.ink), lineWidth: 2.5)
-                layer.draw(Text(style.label).font(.system(size: radius * 0.18, weight: .black)).italic().foregroundColor(style.tagText),
-                           at: .zero, anchor: .center)
-            }
+        context.drawLayer { layer in
+            layer.translateBy(x: bodyRect.maxX - bodyW * 0.02, y: bodyRect.minY - bodyH * 0.06)
+            layer.rotate(by: .degrees(10 + 3 * sin(time * 2)))
+            let tag = Path(CGRect(x: -unit * 0.17, y: -unit * 0.052, width: unit * 0.34, height: unit * 0.104))
+            layer.fill(tag.offsetBy(dx: 3, dy: 3), with: .color(Zine.ink))
+            layer.fill(tag, with: .color(style.tag))
+            layer.stroke(tag, with: .color(Zine.ink), lineWidth: 2.5)
+            layer.draw(Text(style.label).font(.system(size: unit * 0.058, weight: .black)).italic().foregroundColor(style.tagText),
+                       at: .zero, anchor: .center)
         }
 
-        let sparks: [(CGFloat, CGFloat, CGFloat, Double, Color)] = [(-1.45, -0.70, 0.17, 0, Zine.acid), (1.55, 0.78, 0.13, 1.9, Zine.cyan),
-                                                                    (-1.05, 0.95, 0.09, 3.3, Color.white)]
+        let sparks: [(CGFloat, CGFloat, CGFloat, Double, Color)] = [(-0.62, -0.28, 0.055, 0, Zine.acid), (0.66, 0.24, 0.045, 1.9, Zine.cyan),
+                                                                    (-0.5, 0.32, 0.03, 3.3, Color.white)]
         for item in sparks {
             let twinkle = 0.5 + 0.5 * sin(time * 2.4 + item.3)
-            let point = CGPoint(x: center.x + item.0 * radius, y: center.y + item.1 * radius)
-            let star = spark(point, item.2 * radius * CGFloat(0.65 + 0.35 * twinkle))
+            let point = CGPoint(x: center.x + item.0 * unit, y: center.y + item.1 * unit)
+            let star = spark(point, item.2 * unit * CGFloat(0.65 + 0.35 * twinkle))
             context.fill(star, with: .color(item.4))
             context.stroke(star, with: .color(Zine.ink), lineWidth: 1.5)
+        }
+    }
+
+    private static func drawScreen(in context: inout GraphicsContext, glass: Path, rect: CGRect, style: PlanetStyle,
+                                   indicator: GuardIndicator, time: Double, line: CGFloat) {
+        context.drawLayer { layer in
+            layer.clip(to: glass)
+            if indicator == .inactive {
+                // Screen off: a faint reflection and a pulsing standby dot.
+                layer.fill(Path(CGRect(x: rect.minX + rect.width * 0.12, y: rect.minY + rect.height * 0.14,
+                                       width: rect.width * 0.22, height: rect.height * 0.08)), with: .color(Color.white.opacity(0.12)))
+                let pulse = 0.45 + 0.4 * sin(time * 2.2)
+                let dot = circle(CGPoint(x: rect.maxX - rect.width * 0.14, y: rect.maxY - rect.height * 0.18), max(1.5, rect.height * 0.045))
+                layer.fill(dot, with: .color(Zine.hot.opacity(pulse)))
+                return
+            }
+            if indicator == .locked {
+                // Warning stripes crawling behind the face.
+                let band = rect.height * 0.22
+                let shift = CGFloat(time * 18).truncatingRemainder(dividingBy: band * 2)
+                var stripes = Path()
+                var x = rect.minX - rect.height - band * 2 + shift
+                while x < rect.maxX + band {
+                    stripes.move(to: CGPoint(x: x, y: rect.maxY))
+                    stripes.addLine(to: CGPoint(x: x + rect.height, y: rect.minY))
+                    stripes.addLine(to: CGPoint(x: x + rect.height + band, y: rect.minY))
+                    stripes.addLine(to: CGPoint(x: x + band, y: rect.maxY))
+                    stripes.closeSubpath()
+                    x += band * 2
+                }
+                layer.fill(stripes, with: .color(Zine.hot.opacity(0.35)))
+            }
+            if indicator == .attention {
+                // Static noise that reshuffles every frame tick.
+                var seed = UInt64(time * 12) &* 2654435761 &+ 1
+                var noise = Path()
+                let grain = max(1, rect.height * 0.03)
+                for _ in 0..<70 {
+                    seed = seed &* 6364136223846793005 &+ 1442695040888963407
+                    let px = rect.minX + CGFloat(seed >> 40) / CGFloat(1 << 24) * rect.width
+                    let py = rect.minY + CGFloat((seed >> 16) & 0xFFFFFF) / CGFloat(1 << 24) * rect.height
+                    noise.addRect(CGRect(x: px, y: py, width: grain, height: grain))
+                }
+                layer.fill(noise, with: .color(Color.white.opacity(0.22)))
+            }
+
+            // A glitch every few seconds nudges the face sideways.
+            let cycle = time.truncatingRemainder(dividingBy: 3.4)
+            let jump: CGFloat = cycle < 0.12 ? rect.width * 0.05 : 0
+            layer.translateBy(x: jump, y: 0)
+            drawFace(in: &layer, rect: rect, style: style, indicator: indicator, time: time, line: line)
+            layer.translateBy(x: -jump, y: 0)
+
+            // Scanlines and a slow rolling bar.
+            var scan = Path()
+            var y = rect.minY
+            let gap = max(2, rect.height * 0.04)
+            while y < rect.maxY {
+                scan.addRect(CGRect(x: rect.minX, y: y, width: rect.width, height: gap * 0.4))
+                y += gap
+            }
+            layer.fill(scan, with: .color(Color.black.opacity(0.28)))
+            let roll = rect.minY + CGFloat((time * 0.5).truncatingRemainder(dividingBy: 1)) * rect.height
+            layer.fill(Path(CGRect(x: rect.minX, y: roll, width: rect.width, height: rect.height * 0.1)), with: .color(style.face.opacity(0.08)))
+        }
+    }
+
+    private static func drawFace(in context: inout GraphicsContext, rect: CGRect, style: PlanetStyle,
+                                 indicator: GuardIndicator, time: Double, line: CGFloat) {
+        let stroke = StrokeStyle(lineWidth: max(1.5, rect.height * 0.075), lineCap: .square, lineJoin: .miter)
+        let eyeY = rect.midY - rect.height * 0.08
+        let spread = rect.width * 0.2
+        let s = rect.height * 0.12
+        let blink = time.truncatingRemainder(dividingBy: 2.8) < 0.16
+        var features = Path()
+        for side in [-1.0, 1.0] {
+            let eye = CGPoint(x: rect.midX + CGFloat(side) * spread, y: eyeY)
+            switch indicator {
+            case .protecting:
+                if blink {
+                    features.move(to: CGPoint(x: eye.x - s, y: eye.y)); features.addLine(to: CGPoint(x: eye.x + s, y: eye.y))
+                } else {
+                    features.move(to: CGPoint(x: eye.x - s, y: eye.y + s * 0.6))
+                    features.addLine(to: CGPoint(x: eye.x, y: eye.y - s * 0.6))
+                    features.addLine(to: CGPoint(x: eye.x + s, y: eye.y + s * 0.6))
+                }
+            case .locked:
+                // > <
+                let dir = CGFloat(side)
+                features.move(to: CGPoint(x: eye.x - s * dir, y: eye.y - s * 0.7))
+                features.addLine(to: CGPoint(x: eye.x + s * dir, y: eye.y))
+                features.addLine(to: CGPoint(x: eye.x - s * dir, y: eye.y + s * 0.7))
+            default:
+                break
+            }
+        }
+        switch indicator {
+        case .protecting:
+            features.move(to: CGPoint(x: rect.midX - s * 0.8, y: rect.midY + rect.height * 0.16))
+            features.addLine(to: CGPoint(x: rect.midX, y: rect.midY + rect.height * 0.24))
+            features.addLine(to: CGPoint(x: rect.midX + s * 0.8, y: rect.midY + rect.height * 0.16))
+        case .locked:
+            features.move(to: CGPoint(x: rect.midX - s * 0.9, y: rect.midY + rect.height * 0.22))
+            features.addLine(to: CGPoint(x: rect.midX + s * 0.9, y: rect.midY + rect.height * 0.22))
+        default:
+            break
+        }
+        context.drawLayer { glow in
+            glow.addFilter(.shadow(color: style.face.opacity(0.9), radius: rect.height * 0.06))
+            glow.stroke(features, with: .color(style.face), style: stroke)
+            if indicator == .attention {
+                let wiggle = CGFloat(sin(time * 5)) * rect.height * 0.02
+                let font = Font.system(size: rect.height * 0.42, weight: .black, design: .monospaced)
+                for side in [-1.0, 1.0] {
+                    glow.draw(Text("?").font(font).foregroundColor(style.face),
+                              at: CGPoint(x: rect.midX + CGFloat(side) * spread, y: eyeY + wiggle * CGFloat(side)), anchor: .center)
+                }
+                var mouth = Path()
+                mouth.move(to: CGPoint(x: rect.midX - s * 0.7, y: rect.midY + rect.height * 0.24))
+                mouth.addLine(to: CGPoint(x: rect.midX - s * 0.2, y: rect.midY + rect.height * 0.19))
+                mouth.addLine(to: CGPoint(x: rect.midX + s * 0.3, y: rect.midY + rect.height * 0.25))
+                mouth.addLine(to: CGPoint(x: rect.midX + s * 0.8, y: rect.midY + rect.height * 0.2))
+                glow.stroke(mouth, with: .color(style.face), style: stroke)
+            }
         }
     }
 }
