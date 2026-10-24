@@ -5,7 +5,7 @@ import Security
 
 let updateRepository = "tod-zhang/surge-disconnect-guard"
 let updateBundleIdentifier = "local.surgedisconnect.ui"
-let fallbackAppVersion = "2.5.0"
+let fallbackAppVersion = "2.6.0"
 /// Release assets must be uploaded by the repository's CI, not by hand.
 let updateTrustedUploader = "github-actions[bot]"
 var currentAppVersion: String {
