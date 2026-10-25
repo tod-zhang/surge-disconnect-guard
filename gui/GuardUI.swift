@@ -430,6 +430,29 @@ private struct HoverLink: ButtonStyle {
     }
 }
 
+/// Copies text to the clipboard and briefly shows "已复制" in place of its title.
+private struct CopyButton: View {
+    let text: String
+    var sticker = false
+    @State private var copied = false
+    @State private var generation = 0
+    var body: some View {
+        let button = Button(copied ? "已复制" : "复制") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+            copied = true
+            generation += 1
+            let current = generation
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { if generation == current { copied = false } }
+        }.disabled(text.isEmpty).help("复制全部内容到剪贴板")
+        if sticker {
+            button.buttonStyle(SlantButton(fill: copied ? Zine.acid : Zine.cyan, shadow: Zine.hot))
+        } else {
+            button.buttonStyle(HoverLink())
+        }
+    }
+}
+
 /// Diamond status marker with an inked edge.
 private struct Diamond: View {
     var color: Color
@@ -1198,6 +1221,7 @@ struct GuardView: View {
                     Text("最近操作输出").font(.system(size: 11, weight: .bold)).foregroundColor(Zine.secondary)
                     Spacer()
                     if !model.output.isEmpty {
+                        CopyButton(text: model.output)
                         Button("展开 ›") { model.showDetails = true }.buttonStyle(HoverLink())
                     }
                 }.padding(.horizontal, 16).padding(.vertical, 11)
@@ -1403,6 +1427,7 @@ struct GuardView: View {
                 Text("操作详情").font(.system(size: 20, weight: .black)).italic()
                     .shadow(color: Zine.hot, radius: 0, x: 2, y: 2)
                 Spacer()
+                CopyButton(text: model.output.isEmpty ? model.activity : model.output, sticker: true)
                 Button("完成") { model.showDetails = false }.keyboardShortcut(.defaultAction)
                     .buttonStyle(SlantButton())
             }
