@@ -7,7 +7,8 @@ import Dispatch
 @_silgen_name("sg_watch_exit") func watchExit(_ queue: Int32, _ pid: Int32) -> Int32
 @_silgen_name("sg_wait_exit") func waitExit(_ queue: Int32, _ milliseconds: Int32) -> Int32
 @_silgen_name("sg_process_uid") func processUID(_ pid: Int32) -> Int32
-@_silgen_name("sg_fast_cutoff") func nativeFastCutoff(_ preferred: UnsafePointer<CChar>) -> Int32
+@_silgen_name("sg_fast_cutoff") func nativeFastCutoff(_ preferred: UnsafePointer<CChar>, _ spareTunnels: Int32) -> Int32
+@_silgen_name("sg_should_cutoff") func nativeShouldCutoff(_ name: UnsafePointer<CChar>, _ flags: UInt32, _ spareTunnels: Int32) -> Int32
 @_silgen_name("sg_spawn") func nativeSpawn(_ path: UnsafePointer<CChar>,
     _ argv: UnsafePointer<UnsafeMutablePointer<CChar>?>,
     _ envp: UnsafePointer<UnsafeMutablePointer<CChar>?>,
@@ -74,6 +75,8 @@ func isTunnel(_ name: String) -> Bool {
 struct Service: Codable, Equatable {
     var name: String
     var enabled: Bool
+    // Optional so snapshots from older versions remain readable.
+    var isTunnel: Bool? = nil
 }
 struct NetworkView {
     var services: [String: Service]
@@ -99,7 +102,8 @@ struct LockState: Codable, Equatable {
     }
 }
 
-protocol NetworkAccess {
+protocol NetworkAccess: AnyObject {
+    var spareTunnels: Bool { get set }
     func view(includeWiFiPower: Bool) throws -> NetworkView
     func interfaces() throws -> (all: Set<String>, up: Set<String>)
     func setInterfaces(_ names: Set<String>, up: Bool) -> [String]
@@ -354,6 +358,12 @@ final class FeatureMonitor {
 final class MacNetwork: NetworkAccess {
     private let priorityLock = NSLock()
     private var preferredInterface = ""
+    private var preserveTunnels = false
+    // The main loop updates this while event callbacks can cut off concurrently.
+    var spareTunnels: Bool {
+        get { priorityLock.lock(); defer { priorityLock.unlock() }; return preserveTunnels }
+        set { priorityLock.lock(); preserveTunnels = newValue; priorityLock.unlock() }
+    }
     func preferences() throws -> SCPreferences {
         guard let prefs = SCPreferencesCreate(nil, "SurgeDisconnectGuard" as CFString, nil) else {
             throw GuardError("无法读取网络配置：\(SCError())")
@@ -368,8 +378,12 @@ final class MacNetwork: NetworkAccess {
         var values: [String: Service] = [:]
         for service in services {
             guard let id = SCNetworkServiceGetServiceID(service) as String? else { continue }
+            let interface = SCNetworkServiceGetInterface(service)
+            let type = interface.flatMap { SCNetworkInterfaceGetInterfaceType($0) as String? }
+            let tunnel = type == "VPN" || type == (kSCNetworkInterfaceTypePPP as String) ||
+                         type == (kSCNetworkInterfaceTypeIPSec as String)
             values[id] = Service(name: SCNetworkServiceGetName(service) as String? ?? id,
-                                 enabled: SCNetworkServiceGetEnabled(service))
+                                 enabled: SCNetworkServiceGetEnabled(service), isTunnel: tunnel)
         }
         let flags = try interfaceState()
         if let route = SCDynamicStoreCopyValue(nil, "State:/Network/Global/IPv4" as CFString) as? [String: Any],
@@ -442,8 +456,10 @@ final class MacNetwork: NetworkAccess {
         return errors
     }
     func emergencyCutoff() -> [String] {
-        priorityLock.lock(); let preferred = preferredInterface; priorityLock.unlock()
-        let errors = preferred.withCString { nativeFastCutoff($0) }
+        priorityLock.lock()
+        let preferred = preferredInterface, spare = preserveTunnels
+        priorityLock.unlock()
+        let errors = preferred.withCString { nativeFastCutoff($0, spare ? 1 : 0) }
         return errors == 0 ? [] : ["快速关闭网卡遇到 \(errors) 项错误；将继续重试"]
     }
 }
@@ -586,7 +602,10 @@ final class GuardEngine {
     var lastErrorDate = Date.distantPast
     /// With auto-restore on, leave tunnel interfaces alone while locked: they carry nothing once
     /// physical interfaces and services are off, and Surge's own tunnel must survive to recover.
-    var spareTunnels = false
+    var spareTunnels: Bool {
+        get { network.spareTunnels }
+        set { network.spareTunnels = newValue && !corrupted && state?.reason != manualLockReason }
+    }
     // Preference reads and locks are throttled; interface ioctls stay on every tick.
     static let fullEnforceInterval: TimeInterval = 0.1
     var lastFullEnforce: TimeInterval = -.infinity
@@ -599,6 +618,13 @@ final class GuardEngine {
     }
     var locked: Bool { state != nil || corrupted }
     func cuttable(_ names: Set<String>) -> Set<String> { spareTunnels ? names.filter { !isTunnel($0) } : names }
+    func disabledServices(_ services: [String: Service]) -> [String: Service] {
+        services.filter { $0.value.enabled && !(spareTunnels && $0.value.isTunnel == true) }.mapValues {
+            var disabled = $0
+            disabled.enabled = false
+            return disabled
+        }
+    }
     func report(_ messages: [String]) {
         let message = messages.joined(separator: "; ")
         if !message.isEmpty && (message != lastError || Date().timeIntervalSince(lastErrorDate) > 30) {
@@ -618,6 +644,7 @@ final class GuardEngine {
         prepared = snapshot
     }
     func lock(_ reason: String, fast: FastTrip? = nil) {
+        if reason == manualLockReason || corrupted { spareTunnels = false }
         if !locked {
             // Normal arming prepares this ahead of time; standalone/manual lock
             // also preserves a recovery snapshot before its first mutation.
@@ -679,7 +706,7 @@ final class GuardEngine {
             // Fast native ioctl closes currently UP interfaces before slower preference operations.
             errors += network.setInterfaces(cuttable(quick.upInterfaces), up: false)
             // Lock the system preferences only when some service still needs disabling.
-            let disabled = quick.services.filter { $0.value.enabled }.mapValues { Service(name: $0.name, enabled: false) }
+            let disabled = disabledServices(quick.services)
             if !disabled.isEmpty {
                 do { try network.setServices(disabled) } catch { errors.append("\(error)") }
             }
@@ -702,8 +729,8 @@ final class GuardEngine {
             // Persistence/configuration errors must never prevent best-effort cutoff.
             errors += network.emergencyCutoff()
             if let view = try? network.view(includeWiFiPower: false) {
-                errors += network.setInterfaces(view.upInterfaces, up: false)
-                do { try network.setServices(view.services.mapValues { Service(name: $0.name, enabled: false) }) }
+                errors += network.setInterfaces(cuttable(view.upInterfaces), up: false)
+                do { try network.setServices(disabledServices(view.services)) }
                 catch { errors.append("\(error)") }
             }
         }
@@ -781,25 +808,40 @@ final class RecoveryProbe {
     private let mutex = NSLock()
     private var running = false
     private var healthy = 0
-    let check: () -> Bool
-    init(check: @escaping () -> Bool = {
-        guard let pids = try? surgePIDs(), !pids.isEmpty else { return false }
-        do { try requireHealthySurge(pids: pids); return true } catch { return false }
+    private var generation = 0
+    private var failure = "等待首次检查"
+    let check: () throws -> Void
+    init(check: @escaping () throws -> Void = {
+        try requireHealthySurge(pids: surgePIDs())
     }) { self.check = check }
     /// Consecutive healthy checks so far; starts the next check when none is running.
     func poll() -> Int {
         mutex.lock(); defer { mutex.unlock() }
         if !running {
             running = true
+            let startedGeneration = generation
             queue.async { [self] in
-                let ok = check()
-                mutex.lock(); healthy = ok ? healthy + 1 : 0; running = false; mutex.unlock()
+                var errorText: String?
+                do { try check() } catch { errorText = String(describing: error) }
+                mutex.lock()
+                if generation == startedGeneration {
+                    healthy = errorText == nil ? healthy + 1 : 0
+                    failure = errorText ?? ""
+                }
+                running = false
+                mutex.unlock()
             }
         }
         return healthy
     }
-    func reset() { mutex.lock(); healthy = 0; mutex.unlock() }
+    func reset() {
+        mutex.lock(); generation += 1; healthy = 0; failure = "等待首次检查"; mutex.unlock()
+    }
     var streak: Int { mutex.lock(); defer { mutex.unlock() }; return healthy }
+    var status: String {
+        mutex.lock(); defer { mutex.unlock() }
+        return healthy > 0 ? "双模式正常，连续确认 \(healthy)/3 次" : failure
+    }
     /// Tests only: wait for the check in flight.
     func settle() { queue.sync {} }
 }
@@ -845,14 +887,18 @@ func daemon() throws {
     var nextLogCheck: TimeInterval = 0
     var nextProbe: TimeInterval = 0
     let probe = RecoveryProbe()
+    // Set the cutoff policy before any startup failure can invoke the fast path.
+    var settingsError: Error?
+    do { settings = try GuardSettings.load(); autoRestore = settings.autoRestore }
+    catch { settingsError = error }
+    engine.spareTunnels = autoRestore && !engine.corrupted && engine.state?.reason != manualLockReason
     if !engine.locked {
         do { try engine.prepare(); nextSnapshot = ProcessInfo.processInfo.systemUptime + 1 }
         catch { gate.trigger("无法准备恢复快照：\(error)") }
     } else {
         engine.report(network.emergencyCutoff())
     }
-    do { settings = try GuardSettings.load(); autoRestore = settings.autoRestore }
-    catch { gate.trigger("无法读取守护设置：\(error)") }
+    if let error = settingsError { gate.trigger("无法读取守护设置：\(error)") }
     log("START \(buildVersion) 持续连接；正常查询后间隔 \(settings.intervalMS)ms、单次查询超时 \(settings.timeoutMS)ms；首次连接最多等待 500ms；自动恢复网络\(autoRestore ? "已开启" : "已关闭")。")
     while true {
         let now = ProcessInfo.processInfo.systemUptime
@@ -911,7 +957,7 @@ func daemon() throws {
             if engine.locked {
                 if ProcessInfo.processInfo.systemUptime - lastPublished >= 1 {
                     var reason = engine.state?.reason ?? "恢复备份不可读，已按异常处理"
-                    if recoverable { reason += "。Surge 恢复正常后将自动恢复网络。" }
+                    if recoverable { reason += "。自动恢复：\(probe.status)。" }
                     publishStatus("locked", reason, daemonPID: getpid(), timeoutMS: settings.timeoutMS)
                     lastPublished = ProcessInfo.processInfo.systemUptime
                 }
@@ -972,19 +1018,26 @@ func daemon() throws {
 
 // Tests use in-memory networking only; no privileged/network mutation is called.
 final class MemoryNetwork: NetworkAccess {
+    var spareTunnels = false
     var current = NetworkView(services: ["on": Service(name: "Wi-Fi", enabled: true),
                                         "off": Service(name: "Disabled VPN", enabled: false)],
                               upInterfaces: ["en0", "utun88"], wifi: ["en0": true],
                               allInterfaces: ["en0", "en2", "utun88"])
     var serviceFailure = false
+    var viewFailures = 0
+    var interfaceFailure = false
     var mutations = 0
     var serviceCalls = 0
     var onCutoff: (() -> Void)?
     func view(includeWiFiPower: Bool) throws -> NetworkView {
-        NetworkView(services: current.services, upInterfaces: current.upInterfaces,
-                    wifi: includeWiFiPower ? current.wifi : [:], allInterfaces: current.allInterfaces)
+        if viewFailures > 0 { viewFailures -= 1; throw GuardError("injected view failure") }
+        return NetworkView(services: current.services, upInterfaces: current.upInterfaces,
+                           wifi: includeWiFiPower ? current.wifi : [:], allInterfaces: current.allInterfaces)
     }
-    func interfaces() throws -> (all: Set<String>, up: Set<String>) { (current.allInterfaces, current.upInterfaces) }
+    func interfaces() throws -> (all: Set<String>, up: Set<String>) {
+        if interfaceFailure { throw GuardError("injected interface failure") }
+        return (current.allInterfaces, current.upInterfaces)
+    }
     func setInterfaces(_ names: Set<String>, up: Bool) -> [String] {
         mutations += 1
         if up { current.upInterfaces.formUnion(names) } else { current.upInterfaces.subtract(names) }
@@ -1003,7 +1056,7 @@ final class MemoryNetwork: NetworkAccess {
     }
     func emergencyCutoff() -> [String] {
         onCutoff?()
-        return setInterfaces(current.upInterfaces, up: false)
+        return setInterfaces(current.upInterfaces.filter { !spareTunnels || !isTunnel($0) }, up: false)
     }
 }
 final class MemoryStore: StateStore {
@@ -1030,6 +1083,16 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
 }
 func selfTest() throws {
     try settingsSelfTest()
+    for name in ["en0", "en99", "bridge0", "awdl0", "anpi0", "utun88", "ppp0", "ipsec0"] {
+        let cut = name.withCString { nativeShouldCutoff($0, UInt32(IFF_UP), 1) != 0 }
+        let strict = name.withCString { nativeShouldCutoff($0, UInt32(IFF_UP), 0) != 0 }
+        try expect(cut == !isTunnel(name) && strict, "原生快速路径正确选择接口 \(name)")
+    }
+    try expect("lo0".withCString { nativeShouldCutoff($0, UInt32(IFF_UP | IFF_LOOPBACK), 0) } == 0 &&
+               "en0".withCString { nativeShouldCutoff($0, 0, 1) } == 0,
+               "原生快速路径不操作回环或已关闭接口")
+    let legacyService = try JSONDecoder().decode(Service.self, from: Data("{\"name\":\"Wi-Fi\",\"enabled\":true}".utf8))
+    try expect(legacyService.enabled && legacyService.isTunnel == nil, "旧恢复快照缺少隧道分类仍可读取")
     var framing = PromptFrames()
     try framing.append(Data("Features:\n  enhanced-mode: On\n  system-proxy: On\n>".utf8))
     try expect(framing.pop() == nil, "提示符不完整时不接受旧状态")
@@ -1052,13 +1115,13 @@ func selfTest() throws {
     }
     do {
         // Launch /bin/sleep once untimed: its first launch on a fresh machine (e.g. a CI runner) can take
-        // longer than the whole 200ms budget, which would test process startup rather than the threshold.
+        // longer than the query budget, which would test process startup rather than the threshold.
         let warmup = Process()
         warmup.executableURL = URL(fileURLWithPath: "/bin/sleep")
         warmup.arguments = ["0"]
         try warmup.run()
         warmup.waitUntilExit()
-        // Each reply spawns /bin/sleep, so a loaded CI runner can add more than the 100ms margin.
+        // Each reply spawns /bin/sleep, so a loaded CI runner can consume the remaining margin.
         // Accept the threshold if any of three fresh sessions answers in time.
         var accepted = false
         for attempt in 1...3 where !accepted {
@@ -1067,7 +1130,7 @@ func selfTest() throws {
             do { try simulated.query(); accepted = true }
             catch { print("第 \(attempt) 次 100ms 延迟查询未在阈值内完成：\(error)") }
         }
-        try expect(accepted, "100ms 短暂查询延迟在 200ms 阈值内被接受")
+        try expect(accepted, "100ms 短暂查询延迟在默认 \(GuardSettings.defaultTimeoutMS)ms 阈值内被接受")
     }
     do {
         let simulated = try PersistentFeatures(uid: Int32(geteuid()), cancel: { false }, testCommand:
@@ -1087,7 +1150,7 @@ func selfTest() throws {
         monitor.stop()
         let cleaned = monitor.finished.wait(timeout: .now() + 2) == .success
         try expect(triggered && simulatedNetwork.current.upInterfaces.isEmpty && cleaned,
-                   "独立查询队列在\(index == 0 ? "模式关闭" : "200ms 无响应")时触发模拟断网，并清理会话")
+                   "独立查询队列在\(index == 0 ? "模式关闭" : "\(GuardSettings.defaultTimeoutMS)ms 无响应")时触发模拟断网，并清理会话")
     }
     for timeoutMS in [60, 800] {
         let net = MemoryNetwork()
@@ -1220,27 +1283,74 @@ func selfTest() throws {
     catch { try expect(pref.state != nil, "恢复失败时保留锁定备份") }
     let spareNet = MemoryNetwork(), spareStore = MemoryStore()
     let spare = GuardEngine(network: spareNet, store: spareStore)
+    spareNet.current.services["surge"] = Service(name: "Surge", enabled: true, isTunnel: true)
+    spareNet.current.services["vpn-off"] = Service(name: "Disabled VPN", enabled: false, isTunnel: true)
     try spare.prepare()
     spare.spareTunnels = true
-    spare.lock("simulated proxy off")
+    let spareGate = FastGate(cutoff: { spareNet.emergencyCutoff() }, capture: {
+        (all: spareNet.current.allInterfaces, up: spareNet.current.upInterfaces)
+    })
+    spareGate.trigger("simulated query timeout")
+    try expect(spareNet.current.upInterfaces == ["utun88"], "首次快速断网已保留原有隧道并关闭外部接口")
+    if let trip = spareGate.trip { spare.lock(trip.reason, fast: trip) }
+    try expect(spareNet.current.upInterfaces == ["utun88"] &&
+               spareNet.current.services["surge"]?.enabled == true &&
+               spareNet.current.services["on"]?.enabled == false && spareNet.current.wifi["en0"] == false &&
+               spareNet.current.services["vpn-off"]?.enabled == false,
+               "持续锁网保留已开启的 VPN 服务，关闭外部服务与 Wi-Fi，不开启原本关闭的 VPN")
     // Surge raises a new tunnel while the network is locked; a cable is plugged in too.
     spareNet.current.upInterfaces.formUnion(["utun9", "en0"])
     spareNet.current.allInterfaces.insert("utun9")
     spare.enforce()
-    try expect(spareNet.current.upInterfaces == ["utun9"], "开启自动恢复时锁定只关闭物理网卡，保留 Surge 隧道")
+    try expect(spareNet.current.upInterfaces == ["utun88", "utun9"], "开启自动恢复时锁定保留原有和新建隧道")
     spareNet.current.upInterfaces.insert("en0")
     spare.lastFullEnforce = ProcessInfo.processInfo.systemUptime
     spare.enforceTick()
-    try expect(spareNet.current.upInterfaces == ["utun9"], "高频锁定循环同样只关闭物理网卡")
+    try expect(spareNet.current.upInterfaces == ["utun88", "utun9"], "高频锁定循环同样保留隧道")
+    spareNet.current.upInterfaces.insert("en0")
+    spareNet.viewFailures = 1
+    spare.enforce()
+    try expect(spareNet.current.upInterfaces == ["utun88", "utun9"] &&
+               spareNet.current.services["surge"]?.enabled == true,
+               "完整锁网读取失败后的兜底仍保留隧道及 VPN 服务")
+    spareNet.current.upInterfaces.insert("en0")
+    spareNet.interfaceFailure = true
+    spare.lastFullEnforce = ProcessInfo.processInfo.systemUptime
+    spare.enforceTick()
+    spareNet.interfaceFailure = false
+    try expect(spareNet.current.upInterfaces == ["utun88", "utun9"], "高频锁网读取失败后的快速兜底仍保留隧道")
     try spare.restore(raiseTunnels: true)
     try expect(spareNet.current.upInterfaces.isSuperset(of: ["en0", "utun88", "utun9"]) &&
                !spareNet.current.upInterfaces.contains("en2") && spare.prepared == nil && !spare.locked,
                "自动恢复开启断网前在用且仍存在的隧道，不开原本关闭的网卡，并要求重新写快照")
+    spare.spareTunnels = false
+    _ = spareNet.emergencyCutoff()
+    try expect(spareNet.current.upInterfaces.isEmpty, "关闭自动恢复后快速路径恢复为全接口断网")
+    spareNet.current.upInterfaces = ["en0", "utun88"]
+    spare.spareTunnels = true
+    spare.lock(manualLockReason)
+    try expect(!spare.spareTunnels && spareNet.current.upInterfaces.isEmpty &&
+               spareNet.current.services["surge"]?.enabled == false, "手动锁网关闭隧道及 VPN 服务，不自动恢复")
+    corrupt.spareTunnels = true
+    try expect(!corrupt.spareTunnels, "损坏备份不能启用保留隧道策略")
     var answers = [true, true, false, true, true, true]
-    let recovery = RecoveryProbe(check: { answers.removeFirst() })
+    let recovery = RecoveryProbe(check: {
+        if !answers.removeFirst() { throw GuardError("Surge 模式未开启：enhanced-mode") }
+    })
     var streaks: [Int] = []
-    for _ in 0..<6 { _ = recovery.poll(); recovery.settle(); streaks.append(recovery.streak) }
+    for i in 0..<6 {
+        _ = recovery.poll(); recovery.settle(); streaks.append(recovery.streak)
+        if i == 2 { try expect(recovery.status.contains("enhanced-mode"), "自动恢复状态显示阻塞原因") }
+    }
     try expect(streaks == [1, 2, 0, 1, 2, 3], "自动恢复只计连续健康检查，中途异常重新计数")
+    let checkEntered = DispatchSemaphore(value: 0), checkResume = DispatchSemaphore(value: 0)
+    let resetProbe = RecoveryProbe(check: { checkEntered.signal(); checkResume.wait() })
+    _ = resetProbe.poll()
+    let entered = checkEntered.wait(timeout: .now() + 2) == .success
+    resetProbe.reset()
+    checkResume.signal()
+    resetProbe.settle()
+    try expect(entered && resetProbe.streak == 0, "重置恢复检查后忽略旧的在途检查结果")
     // Real kernel event test watches a harmless child, not Surge.
     let child = Process()
     child.executableURL = URL(fileURLWithPath: "/bin/sleep")

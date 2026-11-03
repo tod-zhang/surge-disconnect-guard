@@ -5,7 +5,7 @@ struct SettingsFailure: Error, CustomStringConvertible {
     init(_ message: String) { description = message }
 }
 struct GuardSettings: Codable, Equatable {
-    static let defaultTimeoutMS = 200
+    static let defaultTimeoutMS = 500
     static let minimumTimeoutMS = 10
     static let maximumTimeoutMS = 10_000
     static let defaultIntervalMS = 20
@@ -70,8 +70,8 @@ func settingsSelfTest() throws {
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: directory) }
     let path = directory.appendingPathComponent("settings.json").path
-    guard try GuardSettings.load(from: path).timeoutMS == 200 else { throw SettingsFailure("默认超时错误") }
-    for value in [10, 200, 750, 10000] {
+    guard try GuardSettings.load(from: path).timeoutMS == 500 else { throw SettingsFailure("默认超时错误") }
+    for value in [10, 200, 500, 750, 10000] {
         let settings = try GuardSettings(timeoutMS: value)
         try settings.save(to: path)
         guard try GuardSettings.load(from: path) == settings,
@@ -100,5 +100,5 @@ func settingsSelfTest() throws {
         guard rejected else { throw SettingsFailure("未拒绝无效查询间隔") }
     }
     guard try GuardSettings.parseInterval(" 5 ") == 5, try GuardSettings.parseInterval("1000") == 1000 else { throw SettingsFailure("查询间隔解析错误") }
-    print("PASS 默认 200ms/20ms、边界/自定义值、旧版设置兼容、单项修改、原子保存重读及非法输入/配置拒绝；仅临时目录。")
+    print("PASS 默认 500ms/20ms、边界/自定义值、保留已保存的 200ms、旧版设置兼容、单项修改、原子保存重读及非法输入/配置拒绝；仅临时目录。")
 }
