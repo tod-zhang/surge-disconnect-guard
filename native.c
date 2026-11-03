@@ -14,7 +14,15 @@
 
 /* No subprocess, filesystem access or preference lookup on the fast path.
    Reuse one control socket and close physical interfaces before tunnels. */
-int sg_fast_cutoff(const char *preferred) {
+/* Shared by the real cutoff and unprivileged selection tests. */
+int sg_should_cutoff(const char *name, unsigned int flags, int spare_tunnels) {
+    if (!(flags & IFF_UP) || (flags & IFF_LOOPBACK)) return 0;
+    if (spare_tunnels && (!strncmp(name, "utun", 4) || !strncmp(name, "ppp", 3) ||
+                          !strncmp(name, "ipsec", 5))) return 0;
+    return 1;
+}
+
+int sg_fast_cutoff(const char *preferred, int spare_tunnels) {
     struct ifaddrs *head = NULL;
     if (getifaddrs(&head) < 0) return 1;
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -23,7 +31,7 @@ int sg_fast_cutoff(const char *preferred) {
     unsigned int count = 0;
     int errors = 0;
     for (struct ifaddrs *p = head; p; p = p->ifa_next) {
-        if (!(p->ifa_flags & IFF_UP) || (p->ifa_flags & IFF_LOOPBACK)) continue;
+        if (!sg_should_cutoff(p->ifa_name, p->ifa_flags, spare_tunnels)) continue;
         unsigned int i;
         for (i = 0; i < count; i++) if (!strcmp(names[i], p->ifa_name)) break;
         if (i < count) continue;

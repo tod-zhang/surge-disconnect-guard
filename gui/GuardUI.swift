@@ -1150,12 +1150,12 @@ struct GuardView: View {
                 settingIcon("waveform.path", tint: Zine.cyan)
                 VStack(alignment: .leading, spacing: 5) {
                     Text("无响应超时").font(.system(size: 14, weight: .black))
-                    Text("默认 200 ms · 输入 10～10000 的整数")
+                    Text("默认 \(GuardSettings.defaultTimeoutMS) ms · 输入 10～10000 的整数")
                         .font(.system(size: 11)).foregroundColor(Zine.secondary)
                 }
                 Spacer()
                 HStack(spacing: 6) {
-                    TextField("200", text: $model.timeoutText)
+                    TextField(String(GuardSettings.defaultTimeoutMS), text: $model.timeoutText)
                         .textFieldStyle(.plain).multilineTextAlignment(.trailing)
                         .font(.system(size: 15, weight: .black, design: .monospaced))
                         .onSubmit { model.saveTimeout() }
